@@ -1,0 +1,15 @@
+# Kredensial — jangan pernah commit
+.env
+
+# Artefak runtime
+*.log
+paper_trades*.json
+__pycache__/
+*.pyc
+data/
+*.parquet
+.venv/
+venv/
+
+# Laporan sinyal ter-generate (dibuat ulang tiap jam oleh xau_entry_signal.py)
+reports/

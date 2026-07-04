@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PulseFlow · Battlefield</title>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+<style>
+  html, body { margin:0; padding:0; background:#070709; overflow:hidden; height:100%;
+               font-family:'Segoe UI', Inter, sans-serif; }
+  #game { width:100vw; height:100vh; }
+  #status { position:fixed; top:10px; right:14px; z-index:10; font-size:12px;
+            font-family:Consolas, monospace; color:#7d7d8e; letter-spacing:1px; }
+  #status.ok  { color:#10b981; }
+  #status.bad { color:#f43f5e; }
+  #overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+             background:rgba(7,7,9,0.85); color:#7d7d8e; z-index:20; font-size:18px;
+             flex-direction:column; gap:10px; }
+  #overlay.hidden { display:none; }
+  #overlay .big { font-size:26px; color:#00ffd2; font-weight:800; letter-spacing:2px; }
+  #overlay .sub { font-size:13px; font-family:Consolas, monospace; }
+</style>
+</head>
+<body>
+  <div id="status" class="bad">● DISCONNECTED</div>
+  <div id="overlay">
+    <div class="big">PULSEFLOW BATTLEFIELD</div>
+    <div class="sub" id="ov-sub">connecting to engine…</div>
+  </div>
+  <div id="game"></div>
+
+<script>
+// ── Konfigurasi koneksi ───────────────────────────────────────────────────────
+const params = new URLSearchParams(location.search);
+const WS_PORT = params.get("port") || "8765";
+const WS_URL  = "ws://localhost:" + WS_PORT;
+
+const GAME = { latest: null, connected: false };
+
+function setStatus(connected, text) {
+  const el = document.getElementById("status");
+  GAME.connected = connected;
+  el.className = connected ? "ok" : "bad";
+  el.textContent = (connected ? "● LIVE  " : "● DISCONNECTED  ") + (text || "");
+  const ov = document.getElementById("overlay");
+  if (connected) ov.classList.add("hidden");
+  else { ov.classList.remove("hidden"); document.getElementById("ov-sub").textContent = text || "reconnecting…"; }
+}
+
+function connect() {
+  let ws;
+  try { ws = new WebSocket(WS_URL); }
+  catch (e) { setStatus(false, "ws error"); setTimeout(connect, 1500); return; }
+  ws.onopen    = () => setStatus(true, WS_URL);
+  ws.onmessage = (ev) => { try { GAME.latest = JSON.parse(ev.data); } catch(e){} };
+  ws.onclose   = () => { setStatus(false, "engine offline — retry"); setTimeout(connect, 1500); };
+  ws.onerror   = () => { try { ws.close(); } catch(e){} };
+}
+connect();
+
+// ── Konstanta visual ──────────────────────────────────────────────────────────
+const W = 1280, H = 720;
+const RED = 0xf43f5e, GREEN = 0x10b981, PURPLE = 0xd946ef, NEUTRAL = 0x7d7d8e;
+const GROUND_Y = H - 80;
+const BAND_TOP = GROUND_Y - 150;          // tinggi formasi pasukan
+const LINE_MIN = 210, LINE_MAX = W - 210; // jangkauan gerak frontline
+const CENTER_X = W / 2;
+const HALF_TRAVEL = (LINE_MAX - LINE_MIN) / 2;
+const MAX_SOLDIERS = 46;
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function fmtUsd(v) {
+  v = Math.abs(v||0);
+  if (v >= 1e6) return "$" + (v/1e6).toFixed(1) + "M";
+  if (v >= 1e3) return "$" + (v/1e3).toFixed(0) + "K";
+  return "$" + v.toFixed(0);
+}
+function colorToCss(int) { return "#" + int.toString(16).padStart(6, "0"); }
+
+// ── Scene ─────────────────────────────────────────────────────────────────────
+class BattleScene extends Phaser.Scene {
+  constructor() { super("battle"); }
+
+  preload() {}
+
+  create() {
+    this.disp = { front:0, buyer:0, seller:0, buyWall:0, sellWall:0, agg:0, tint:NEUTRAL };
+    this.seen = new Set();
+
+    this.makeTextures();
+    this.buildBackground();
+    this.buildFortresses();
+    this.buildArmies();
+    this.buildFrontline();
+    this.buildHud();
+
+    // Emitter percikan benturan di garis depan
+    this.clash = this.add.particles(0, 0, "spark", {
+      speed: { min: 40, max: 160 }, angle: { min: 0, max: 360 },
+      scale: { start: 0.9, end: 0 }, lifespan: 450, quantity: 0,
+      blendMode: "ADD", tint: 0xfff2b0,
+    });
+    this.clash.setDepth(6);
+
+    this.scale.on("resize", () => {});
+  }
+
+  // ── Tekstur prosedural ──────────────────────────────────────────────────────
+  makeTextures() {
+    // percikan
+    let g = this.add.graphics();
+    g.fillStyle(0xffffff, 1); g.fillCircle(4, 4, 4);
+    g.generateTexture("spark", 8, 8); g.destroy();
+
+    // prajurit (dua warna)
+    const soldier = (key, color) => {
+      const s = this.add.graphics();
+      s.fillStyle(color, 1);
+      s.fillRoundedRect(3, 7, 9, 13, 3);   // badan
+      s.fillCircle(7.5, 6, 4.5);           // kepala
+      s.lineStyle(2, 0xffffff, 0.85);
+      s.lineBetween(13, 1, 13, 22);        // tombak
+      s.fillStyle(0xffffff, 0.9);
+      s.fillTriangle(13, 1, 10, 5, 16, 5); // mata tombak
+      s.generateTexture(key, 18, 24); s.destroy();
+    };
+    soldier("buyer", GREEN);
+    soldier("seller", RED);
+  }
+
+  // ── Latar ───────────────────────────────────────────────────────────────────
+  buildBackground() {
+    const bg = this.add.graphics();
+    bg.fillGradientStyle(0x0a0a12, 0x0a0a12, 0x12121c, 0x07070a, 1);
+    bg.fillRect(0, 0, W, H);
+    // garis grid samar
+    bg.lineStyle(1, 0x16161f, 1);
+    for (let x = 0; x <= W; x += 64) bg.lineBetween(x, 0, x, GROUND_Y);
+    // tanah
+    bg.fillStyle(0x0d0d14, 1);
+    bg.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+    bg.lineStyle(2, 0x1d1d2a, 1);
+    bg.lineBetween(0, GROUND_Y, W, GROUND_Y);
+    bg.setDepth(0);
+
+    // overlay tint state (alpha rendah)
+    this.stateTint = this.add.rectangle(W/2, H/2, W, H, NEUTRAL, 0.06).setDepth(1);
+
+    // label sisi
+    this.add.text(40, GROUND_Y + 24, "◄ BUYERS", { fontFamily:"Consolas", fontSize:"18px",
+      color: colorToCss(GREEN), fontStyle:"bold" }).setDepth(2);
+    this.add.text(W - 40, GROUND_Y + 24, "SELLERS ►", { fontFamily:"Consolas", fontSize:"18px",
+      color: colorToCss(RED), fontStyle:"bold" }).setOrigin(1,0).setDepth(2);
+  }
+
+  // ── Benteng ──────────────────────────────────────────────────────────────────
+  buildFortresses() {
+    this.buyFort  = this.add.graphics().setDepth(3);  // kiri (buy_wall)
+    this.sellFort = this.add.graphics().setDepth(3);  // kanan (sell_wall)
+  }
+
+  drawFortress(g, xEdge, integrity, color, facing) {
+    g.clear();
+    const maxH = 150, baseY = GROUND_Y;
+    const h = clamp(integrity/100, 0, 1) * maxH;
+    if (h < 4) return;
+    const wWall = 46;
+    const x = facing === "right" ? xEdge - wWall : xEdge;
+    // badan tembok
+    g.fillStyle(color, 0.18);
+    g.fillRect(x, baseY - h, wWall, h);
+    g.lineStyle(2, color, 0.7);
+    g.strokeRect(x, baseY - h, wWall, h);
+    // crenellation (gerigi atas), jumlah berkurang saat terkikis
+    const merlons = 5;
+    const mw = wWall / (merlons*2 - 1);
+    for (let i = 0; i < merlons; i++) {
+      g.fillStyle(color, 0.55);
+      g.fillRect(x + i*2*mw, baseY - h - 10, mw, 10);
+    }
+    // retakan saat integritas rendah
+    if (integrity < 45) {
+      g.lineStyle(1.5, 0x000000, 0.5);
+      g.lineBetween(x + wWall*0.3, baseY - h, x + wWall*0.55, baseY - h*0.4);
+      g.lineBetween(x + wWall*0.6, baseY - h*0.8, x + wWall*0.4, baseY);
+    }
+  }
+
+  // ── Pasukan ──────────────────────────────────────────────────────────────────
+  buildArmies() {
+    this.buyers = [];
+    this.sellers = [];
+    const mk = (key) => {
+      const arr = [];
+      for (let i = 0; i < MAX_SOLDIERS; i++) {
+        const s = this.add.image(0, 0, key).setDepth(4).setVisible(false);
+        s.row = Phaser.Math.Between(BAND_TOP, GROUND_Y - 12);
+        s.frac = Math.random();            // posisi 0=basis .. 1=garis depan
+        s.phase = Math.random() * Math.PI * 2;
+        arr.push(s);
+      }
+      return arr;
+    };
+    this.buyers = mk("buyer");
+    this.sellers = mk("seller");
+  }
+
+  updateArmy(arr, strength, side, lineX, agg, time) {
+    const target = Math.round(clamp(strength/100, 0, 1) * MAX_SOLDIERS);
+    const base = side === "buy" ? 130 : W - 130;
+    for (let i = 0; i < arr.length; i++) {
+      const s = arr[i];
+      if (i >= target) { s.setVisible(false); continue; }
+      s.setVisible(true);
+      const reach = (lineX - base);                 // jarak basis→garis
+      let x = base + s.frac * reach * 0.92;
+      // gerak maju-mundur + getaran proporsional agresi
+      const jitter = (agg/100) * 6;
+      x += Math.sin(time*0.004 + s.phase) * (3 + jitter);
+      const y = s.row + Math.sin(time*0.006 + s.phase*1.7) * 2;
+      s.x = x; s.y = y;
+      s.setFlipX(side === "seller");
+      // skala & alpha ikut agresi (morale)
+      const sc = 1 + (agg/100)*0.25;
+      s.setScale(sc);
+      s.setAlpha(0.65 + (agg/100)*0.35);
+    }
+  }
+
+  // ── Frontline (fitur inti) ───────────────────────────────────────────────────
+  buildFrontline() {
+    this.lineGlow = this.add.rectangle(CENTER_X, (BAND_TOP+GROUND_Y)/2, 26,
+      (GROUND_Y - BAND_TOP) + 60, 0xffffff, 0.10).setDepth(5).setBlendMode(Phaser.BlendModes.ADD);
+    this.lineCore = this.add.rectangle(CENTER_X, (BAND_TOP+GROUND_Y)/2, 5,
+      (GROUND_Y - BAND_TOP) + 50, 0xffffff, 0.95).setDepth(6);
+    this.sword = this.add.text(CENTER_X, BAND_TOP - 26, "⚔",
+      { fontFamily:"Segoe UI Emoji", fontSize:"34px" }).setOrigin(0.5).setDepth(7);
+  }
+
+  // ── HUD ──────────────────────────────────────────────────────────────────────
+  buildHud() {
+    // panel atas
+    this.add.rectangle(W/2, 44, W, 88, 0x0b0b12, 0.82).setDepth(8);
+    this.hudState = this.add.text(24, 16, "⬜ CEASEFIRE",
+      { fontFamily:"Consolas", fontSize:"20px", color:"#7d7d8e", fontStyle:"bold" }).setDepth(9);
+    this.hudHeadline = this.add.text(24, 46, "MARKET QUIET",
+      { fontFamily:"Outfit, Inter, sans-serif", fontSize:"26px", color:"#7d7d8e", fontStyle:"bold" }).setDepth(9);
+    this.hudSub = this.add.text(W - 24, 22, "",
+      { fontFamily:"Consolas", fontSize:"15px", color:"#9a9aa8", align:"right" })
+      .setOrigin(1,0).setDepth(9);
+
+    // meter frontline klasik di tengah-atas (baca 1 detik)
+    this.meterBg = this.add.rectangle(W/2, 70, 560, 14, 0x15151c, 1).setDepth(9);
+    this.meterFill = this.add.graphics().setDepth(9);
+    this.meterMark = this.add.rectangle(W/2, 70, 4, 22, 0xffffff, 1).setDepth(10);
+    this.add.text(W/2 - 290, 64, "S", { fontFamily:"Consolas", fontSize:"12px", color: colorToCss(RED) }).setDepth(9);
+    this.add.text(W/2 + 282, 64, "B", { fontFamily:"Consolas", fontSize:"12px", color: colorToCss(GREEN) }).setDepth(9);
+  }
+
+  // ── Event spesial ────────────────────────────────────────────────────────────
+  fireEvent(ev) {
+    if (ev.kind === "WHALE") this.spawnWhale(ev);
+    else this.spawnLiquidation(ev);
+  }
+
+  spawnWhale(ev) {
+    const fromLeft = ev.side === "BUY";
+    const color = fromLeft ? GREEN : RED;
+    const y = BAND_TOP - 70;
+    const startX = fromLeft ? -120 : W + 120;
+    const endX   = fromLeft ? W + 120 : -120;
+    const glow = this.add.ellipse(startX, y, 120, 70, color, 0.25)
+      .setBlendMode(Phaser.BlendModes.ADD).setDepth(11);
+    const whale = this.add.text(startX, y, "🐋",
+      { fontFamily:"Segoe UI Emoji", fontSize:"70px" }).setOrigin(0.5).setDepth(12);
+    if (!fromLeft) whale.setFlipX(true);
+    const label = this.add.text(startX, y + 52, "WHALE " + ev.side + "  " + fmtUsd(ev.usd),
+      { fontFamily:"Consolas", fontSize:"18px", color: colorToCss(color), fontStyle:"bold" })
+      .setOrigin(0.5).setDepth(12);
+    // semburan air
+    const splash = this.add.particles(startX, y+30, "spark", {
+      speedY: { min:-120, max:-30 }, speedX: { min:-40, max:40 },
+      scale: { start:0.8, end:0 }, lifespan:600, quantity:2, frequency:30,
+      tint:0x6fd3ff, blendMode:"ADD",
+    }).setDepth(11);
+    this.tweens.add({
+      targets:[whale, glow, label], x: endX, duration: 3200, ease:"Sine.InOut",
+      onUpdate: () => { splash.setX(whale.x); splash.setY(y+30); },
+      onComplete: () => { whale.destroy(); glow.destroy(); label.destroy(); splash.destroy(); },
+    });
+    this.tweens.add({ targets: whale, y: y-14, duration: 800, yoyo:true, repeat:2, ease:"Sine.InOut" });
+  }
+
+  spawnLiquidation(ev) {
+    const x = CENTER_X + (Math.random()-0.5) * 300;
+    const y = (BAND_TOP + GROUND_Y) / 2;
+    this.cameras.main.shake(260, 0.012);
+    this.cameras.main.flash(160, 217, 70, 239);
+    const burst = this.add.particles(x, y, "spark", {
+      speed:{ min:120, max:380 }, angle:{ min:0, max:360 },
+      scale:{ start:1.2, end:0 }, lifespan:700, blendMode:"ADD", tint:PURPLE,
+    }).setDepth(13);
+    burst.explode(40);
+    const skull = this.add.text(x, y, "☠ " + ev.side + " LIQUIDATION",
+      { fontFamily:"Segoe UI Emoji", fontSize:"30px", color: colorToCss(PURPLE), fontStyle:"bold" })
+      .setOrigin(0.5).setDepth(14);
+    this.tweens.add({ targets: skull, y: y - 60, alpha: 0, scale: 1.4,
+      duration: 1300, ease:"Cubic.Out",
+      onComplete: () => { skull.destroy(); burst.destroy(); } });
+  }
+
+  // ── Loop ─────────────────────────────────────────────────────────────────────
+  update(time, delta) {
+    const b = GAME.latest;
+    if (!b) return;
+    const buyer = b.buyer || {}, seller = b.seller || {}, fort = b.fortress || {};
+    const nar = b.narrative || {};
+    const agg = b.aggression || 0;
+    const tintColor = Phaser.Display.Color.HexStringToColor(b.state_color || "#7d7d8e").color;
+
+    // easing
+    const k = 0.12;
+    this.disp.front   = lerp(this.disp.front,   b.frontline || 0, k);
+    this.disp.buyer   = lerp(this.disp.buyer,   buyer.strength || 0, k);
+    this.disp.seller  = lerp(this.disp.seller,  seller.strength || 0, k);
+    this.disp.buyWall = lerp(this.disp.buyWall, fort.buy_wall || 0, k);
+    this.disp.sellWall= lerp(this.disp.sellWall,fort.sell_wall || 0, k);
+    this.disp.agg     = lerp(this.disp.agg,     agg, 0.08);
+
+    const lineX = clamp(CENTER_X + (this.disp.front/100) * HALF_TRAVEL, LINE_MIN, LINE_MAX);
+    const winColor = this.disp.front >= 0 ? GREEN : RED;
+
+    // pasukan
+    this.updateArmy(this.buyers,  this.disp.buyer,  "buy",    lineX, this.disp.agg, time);
+    this.updateArmy(this.sellers, this.disp.seller, "seller", lineX, this.disp.agg, time);
+
+    // benteng
+    this.drawFortress(this.buyFort,  88,      this.disp.buyWall,  GREEN, "left");
+    this.drawFortress(this.sellFort, W - 88,  this.disp.sellWall, RED,   "right");
+
+    // frontline
+    this.lineCore.x = lineX; this.lineGlow.x = lineX; this.sword.x = lineX;
+    this.lineCore.setFillStyle(winColor, 0.95);
+    this.lineGlow.setFillStyle(winColor, 0.12 + (this.disp.agg/100)*0.18);
+    const pulse = 1 + Math.sin(time*0.012) * 0.06 * (this.disp.agg/100);
+    this.lineGlow.scaleX = pulse;
+    // percikan benturan ∝ agresi
+    this.clash.setPosition(lineX, (BAND_TOP+GROUND_Y)/2);
+    this.clash.frequency = this.disp.agg > 15 ? Math.max(8, 80 - this.disp.agg) : -1;
+    this.clash.quantity = this.disp.agg > 15 ? 2 : 0;
+    this.clash.setParticleTint(winColor);
+
+    // tint state
+    const cur = this.stateTint.fillColor;
+    const blended = Phaser.Display.Color.Interpolate.ColorWithColor(
+      Phaser.Display.Color.IntegerToColor(cur),
+      Phaser.Display.Color.IntegerToColor(tintColor), 100, 6);
+    this.stateTint.setFillStyle(Phaser.Display.Color.GetColor(blended.r, blended.g, blended.b), 0.07);
+
+    // HUD
+    const css = b.state_color || "#7d7d8e";
+    this.hudState.setText((b.state_emoji||"") + " " + (b.state||""));
+    this.hudState.setColor(css);
+    this.hudHeadline.setText(nar.headline || "—");
+    this.hudHeadline.setColor(css);
+    this.hudSub.setText(
+      "PRESSURE " + (nar.pressure||"—") + "   MOMENTUM " + (nar.momentum||"—") +
+      "   WHALE " + (nar.whale_support||"—") + "\n→ " + (nar.target||"—"));
+
+    // meter frontline
+    this.meterMark.x = (W/2 - 280) + (clamp(this.disp.front,-100,100)+100)/200 * 560;
+    this.meterMark.setFillStyle(winColor, 1);
+    this.meterFill.clear();
+    const mid = W/2, fillW = (this.disp.front/100) * 280;
+    this.meterFill.fillStyle(winColor, 0.55);
+    if (fillW >= 0) this.meterFill.fillRect(mid, 63, fillW, 14);
+    else this.meterFill.fillRect(mid + fillW, 63, -fillW, 14);
+
+    // deteksi event baru
+    (b.events || []).forEach(ev => {
+      const id = ev.kind + ":" + (ev.ts||0).toFixed(2);
+      if (!this.seen.has(id)) {
+        this.seen.add(id);
+        // hanya picu event yang baru (umur < 0.6s) agar tak meledak saat baru konek
+        if (b.ts && (b.ts - ev.ts) < 0.6) this.fireEvent(ev);
+      }
+    });
+    if (this.seen.size > 300) this.seen = new Set([...this.seen].slice(-120));
+  }
+}
+
+new Phaser.Game({
+  type: Phaser.AUTO,
+  parent: "game",
+  width: W, height: H,
+  backgroundColor: "#070709",
+  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+  fps: { target: 60 },
+  scene: BattleScene,
+});
+</script>
+</body>
+</html>
