@@ -1,0 +1,5 @@
+# PulseFlow — dependensi GUI desktop (run.py). Tidak diperlukan di VPS.
+-r requirements.txt
+
+PyQt6>=6.7
+pyqtgraph>=0.13.7

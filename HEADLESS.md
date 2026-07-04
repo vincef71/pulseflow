@@ -8,23 +8,41 @@ RAM cukup untuk 1–2 symbol).
 ## 1. Persiapan VPS
 
 ```bash
-sudo apt update && sudo apt install -y python3 python3-venv python3-pip
-mkdir -p ~/pulseflow && cd ~/pulseflow
-# salin project ke VPS (tanpa folder reports/ dan log):
-#   dari Windows: scp -r F:/tradingbot/pulseflow user@vps:~/ 
-#   atau via git kalau project sudah di repo
+# 1. Python + git
+sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
 
+# 2. Clone project
+git clone https://github.com/vincef71/pulseflow.git ~/pulseflow
+cd ~/pulseflow
+
+# 3. Buat virtual environment (sekali saja) lalu aktifkan
 python3 -m venv .venv
-source .venv/bin/activate
-pip install numpy aiohttp websockets requests websocket-client \
-            python-binance python-dotenv pyarrow \
-            hyperliquid-python-sdk
+source .venv/bin/activate      # prompt berubah jadi (.venv)
+
+# 4. Install dependensi headless (tanpa PyQt6)
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-> PyQt6 **tidak** perlu diinstall — semua modul UI hanya diimport oleh
-> `run.py` (GUI), bukan oleh `run_headless.py`.
+> PyQt6 **tidak** perlu diinstall di VPS — semua modul UI hanya diimport
+> oleh `run.py` (GUI). Untuk GUI di desktop:
+> `pip install -r requirements-gui.txt`.
 
-Salin `.env` ke root project di VPS (berisi API key — `chmod 600 .env`).
+Catatan venv:
+- Aktifkan lagi tiap login baru: `source ~/pulseflow/.venv/bin/activate`
+  (`deactivate` untuk keluar).
+- Tanpa mengaktifkan pun bisa langsung:
+  `~/pulseflow/.venv/bin/python run_headless.py …` — cara ini yang
+  dipakai di unit systemd di bawah.
+- Di Windows aktivasinya: `.venv\Scripts\activate`.
+
+Terakhir, buat `.env` dari template lalu isi API key:
+
+```bash
+cp .env.example .env
+nano .env                      # isi BINANCE_API_KEY / SECRET
+chmod 600 .env                 # hanya bisa dibaca user ini
+```
 
 ## 2. Menjalankan
 

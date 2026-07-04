@@ -1,0 +1,18 @@
+# PulseFlow — dependensi core + headless (VPS, tanpa GUI).
+# Untuk GUI desktop: pip install -r requirements-gui.txt
+
+# Analitik & data
+numpy>=2.0,<3
+pandas>=2.2,<3
+pyarrow>=17           # storage parquet (metrics/trades)
+
+# Feed realtime
+aiohttp>=3.10,<4      # Binance REST (klines, deep book)
+websockets>=13        # Binance WS (aggTrade/depth/forceOrder)
+requests>=2.32,<3     # Hyperliquid REST + xau_entry_signal
+websocket-client>=1.8 # Hyperliquid WS
+hyperliquid-python-sdk>=0.15
+
+# Eksekusi trading
+python-binance>=1.0.29
+python-dotenv>=1.0
