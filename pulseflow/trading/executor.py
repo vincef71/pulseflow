@@ -37,6 +37,7 @@ logger = logging.getLogger("PulseFlow.Executor")
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PAPER_LOG_FILE = _PROJECT_ROOT / "paper_trades.json"
+LIVE_LOG_FILE = _PROJECT_ROOT / "live_trades.json"
 PAPER_START_BALANCE = 10_000.0
 
 
@@ -274,14 +275,19 @@ class TradeExecutor:
 
     # ── Eksekusi ──────────────────────────────────────────────────────
 
-    def execute(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
+    def execute(self, prepared: Dict[str, Any],
+                context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Eksekusi order yang sudah disiapkan `prepare_order` DAN sudah
-        dikonfirmasi user (untuk LIVE). Entry market + SL + TP1."""
-        if self.paper_mode:
-            return self._execute_paper(prepared)
-        return self._execute_live(prepared)
+        dikonfirmasi user (untuk LIVE). Entry market + SL + TP1.
 
-    def _execute_paper(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        `context` (opsional): {setup, score, grade} dari entry engine —
+        dicatat ke jurnal supaya hasil bisa dianalisa per jenis setup."""
+        if self.paper_mode:
+            return self._execute_paper(prepared, context)
+        return self._execute_live(prepared, context)
+
+    def _execute_paper(self, p: Dict[str, Any],
+                       context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         fee_open = p["notional_usdt"] * self.taker_fee_pct / 100.0
         trade = {
             "status": "PAPER_OPEN",
@@ -297,6 +303,9 @@ class TradeExecutor:
             "fee_usdt": round(fee_open, 2),   # fee buka; fee tutup menyusul
             "opened_at": datetime.now().isoformat(timespec="seconds"),
         }
+        if context:
+            trade.update({k: context[k] for k in ("setup", "score", "grade")
+                          if k in context})
         self._append_paper_log(trade)
         logger.info("PAPER order: %s %s qty %s @ %s (SL %s, TP1 %s)",
                     p["side"], p["symbol"], p["quantity"], p["entry"],
@@ -304,7 +313,8 @@ class TradeExecutor:
         return {"ok": True, "mode": "PAPER", "trade": trade,
                 "note": "Order disimulasikan & dicatat ke paper_trades.json"}
 
-    def _execute_live(self, p: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_live(self, p: Dict[str, Any],
+                      context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         from binance.enums import SIDE_BUY, SIDE_SELL, FUTURE_ORDER_TYPE_MARKET
 
         c = self.client()
@@ -359,6 +369,37 @@ class TradeExecutor:
         results["ok"] = True
         self._live_tracked.add(bsymbol)   # posisi milik sesi ini → boleh
                                           # ditutup otomatis saat setup mati
+
+        # Jurnal live (live_trades.json) — konteks setup/skor + timestamp
+        # untuk digabung dengan fill Binance oleh live_report.py.
+        # PnL & harga exit TIDAK dicatat di sini: sumber kebenarannya API.
+        entry_order = results["entry_order"]
+        try:
+            avg_fill = float(entry_order.get("avgPrice") or 0.0)
+        except (TypeError, ValueError):
+            avg_fill = 0.0
+        rec = {
+            "status": "LIVE_OPEN",
+            "symbol": bsymbol,
+            "side": p["side"],
+            "quantity": p["quantity"],
+            "entry_plan": p["entry"],
+            "entry_fill": avg_fill or p["entry"],
+            "stop": p["stop"],
+            "tp1": p["tp1"],
+            "tp2": p["tp2"],
+            "risk_usdt": p["risk_usdt"],
+            "notional_usdt": p["notional_usdt"],
+            "leverage": p["leverage"],
+            "order_id": entry_order.get("orderId"),
+            "opened_at": datetime.now().isoformat(timespec="seconds"),
+            "opened_ts": int(time.time() * 1000),
+        }
+        if context:
+            rec.update({k: context[k] for k in ("setup", "score", "grade")
+                        if k in context})
+        self._append_live_log(rec)
+
         logger.info("🔴 LIVE order terisi: %s %s qty %s (SL %s, TP1 %s)",
                     p["side"], bsymbol, qty_s, sl_s, tp_s)
         return results
@@ -394,6 +435,7 @@ class TradeExecutor:
         except Exception as e:
             logger.warning("Cancel algo order sisa %s gagal: %s", bsymbol, e)
         self._live_tracked.discard(bsymbol)
+        self._mark_live_closed(bsymbol, reason or "SETUP_END")
         logger.info("🔴 LIVE exit %s (%s): posisi %s, order sisa dibatalkan",
                     bsymbol, reason, "ditutup" if closed else "sudah kosong")
         return {"ok": True, "closed_position": closed, "reason": reason,
@@ -426,6 +468,7 @@ class TradeExecutor:
             type=FUTURE_ORDER_TYPE_MARKET,
             quantity=_fmt(abs(amt), step), reduceOnly=True)
         self._live_tracked.discard(bsymbol)
+        self._mark_live_closed(bsymbol, "MANUAL")
         return {"ok": True, "mode": "LIVE", "order": order}
 
     def close_paper_trades(self, symbol: str, exit_price: float,
@@ -499,3 +542,43 @@ class TradeExecutor:
     def _paper_realized_pnl(self) -> float:
         return sum(float(t.get("pnl_usdt", 0.0)) for t in self._read_paper_log()
                    if t.get("status") == "PAPER_CLOSED")
+
+    # ── Live log ──────────────────────────────────────────────────────
+    # Jurnal konteks (setup/skor/alasan exit) — pelengkap data fill Binance,
+    # digabung oleh live_report.py. Bukan sumber PnL.
+
+    def _read_live_log(self) -> list:
+        if LIVE_LOG_FILE.exists():
+            try:
+                return json.loads(LIVE_LOG_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                return []
+        return []
+
+    def _write_live_log(self, logs: list):
+        LIVE_LOG_FILE.write_text(
+            json.dumps(logs, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _append_live_log(self, trade: Dict[str, Any]):
+        logs = self._read_live_log()
+        logs.append(trade)
+        self._write_live_log(logs)
+
+    def _mark_live_closed(self, bsymbol: str, reason: str):
+        """Tandai semua record LIVE_OPEN symbol ini sebagai LIVE_CLOSED.
+        closed_ts = saat exit terdeteksi (SL/TP exchange bisa terisi sedikit
+        lebih awal) — live_report.py mencocokkan fill dengan margin waktu."""
+        try:
+            logs = self._read_live_log()
+            n = 0
+            for t in logs:
+                if t.get("symbol") == bsymbol and t.get("status") == "LIVE_OPEN":
+                    t["status"] = "LIVE_CLOSED"
+                    t["close_reason"] = reason
+                    t["closed_at"] = datetime.now().isoformat(timespec="seconds")
+                    t["closed_ts"] = int(time.time() * 1000)
+                    n += 1
+            if n:
+                self._write_live_log(logs)
+        except Exception as e:
+            logger.warning("Update jurnal live %s gagal: %s", bsymbol, e)

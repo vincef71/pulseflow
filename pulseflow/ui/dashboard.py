@@ -627,7 +627,9 @@ class PulseDashboard(QMainWindow):
                         f"🤖 AUTO: posisi {symbol} masih terbuka — sinyal dilewati")
                     return
                 prepared = self.executor.prepare_order(symbol, plan)
-                res = self.executor.execute(prepared)
+                res = self.executor.execute(
+                    prepared,
+                    {k: entry.get(k) for k in ("setup", "score", "grade")})
                 res["auto"] = True
                 res["summary"] = (f"{prepared['side']} {prepared['symbol']} "
                                   f"qty {prepared['quantity']} @ ~{prepared['entry']:,.6g} "
@@ -684,6 +686,8 @@ class PulseDashboard(QMainWindow):
             return
         self._exec_busy = True
         self._exec_was_auto = False
+        # Konteks setup untuk jurnal (dipakai saat eksekusi setelah konfirmasi)
+        self._exec_context = {k: entry.get(k) for k in ("setup", "score", "grade")}
         self.entry_card.exec_btn.setEnabled(False)
         symbol = self.current_focus_symbol
         self.statusBar().showMessage(f"Menyiapkan order {symbol}…")
@@ -735,7 +739,8 @@ class PulseDashboard(QMainWindow):
 
         def work():
             try:
-                self.exec_done.emit(self.executor.execute(p))
+                self.exec_done.emit(
+                    self.executor.execute(p, getattr(self, "_exec_context", None)))
             except Exception as e:
                 self.exec_failed.emit(str(e))
         threading.Thread(target=work, daemon=True, name="exec-order").start()

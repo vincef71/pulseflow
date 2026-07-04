@@ -4,6 +4,7 @@
 # Artefak runtime
 *.log
 paper_trades*.json
+live_trades*.json
 __pycache__/
 *.pyc
 data/

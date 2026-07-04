@@ -148,6 +148,7 @@ class HeadlessTrader:
             self._busy[symbol] = True
 
         plan = dict(plan)
+        context = {k: entry.get(k) for k in ("setup", "score", "grade")}
         logger.info("🔥 FIRE: %s — menyiapkan order…", desc)
 
         def work():
@@ -156,7 +157,7 @@ class HeadlessTrader:
                     logger.info("⏭ Posisi %s masih terbuka — sinyal dilewati", symbol)
                     return
                 prepared = self.executor.prepare_order(symbol, plan)
-                res = self.executor.execute(prepared)
+                res = self.executor.execute(prepared, context)
                 if res.get("ok"):
                     self._consec_errors = 0
                     self.trades_opened += 1
