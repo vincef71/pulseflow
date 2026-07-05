@@ -649,6 +649,27 @@ class TradeExecutor:
             logger.info("PAPER close %s: %d posisi (%s)", bsymbol, n, reason)
         return n
 
+    def realized_pnl_today(self) -> float:
+        """PnL terealisasi sejak 00:00 waktu lokal — untuk guard max loss
+        harian. Paper: dari paper_trades.json. Live: income Binance
+        (REALIZED_PNL + COMMISSION + FUNDING_FEE) — panggil dari worker
+        thread, ini network call."""
+        if self.paper_mode:
+            today = datetime.now().strftime("%Y-%m-%d")
+            return sum(float(t.get("pnl_usdt", 0.0)) for t in self._read_paper_log()
+                       if t.get("status") == "PAPER_CLOSED"
+                       and str(t.get("closed_at", "")).startswith(today))
+        midnight = datetime.combine(datetime.now().date(), datetime.min.time())
+        start_ms = int(midnight.timestamp() * 1000)
+        total = 0.0
+        batch = self.client().futures_income_history(
+            startTime=start_ms, limit=1000)
+        for it in batch:
+            if it.get("incomeType") in ("REALIZED_PNL", "COMMISSION",
+                                        "FUNDING_FEE"):
+                total += float(it.get("income", 0.0))
+        return total
+
     def verify_connection(self) -> Dict[str, Any]:
         """Cek read-only: key valid + permission futures + balance USDT.
         Tidak menempatkan order."""

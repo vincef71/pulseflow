@@ -34,6 +34,7 @@ Jalankan permanen di VPS via systemd/tmux — lihat HEADLESS.md.
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
 import sys
@@ -98,6 +99,8 @@ sys.unraisablehook = _log_unraisable
 END_STATUSES = ("STOP", "TP2", "FLIP", "FADED", "TRAIL")
 MAX_CONSEC_EXEC_ERRORS = 3
 
+CONTROL_FILE = Path(__file__).resolve().parent / "control.json"
+
 
 class HeadlessTrader:
     """Pengganti logika auto-trade dashboard: konsumsi tick engine dan
@@ -111,8 +114,19 @@ class HeadlessTrader:
         # rebase_cb(symbol, fill_price): geser plan engine ke harga fill
         # exchange (slippage market order) — geometri R tetap konsisten.
         self._rebase_cb = rebase_cb
-        self.armed = True                      # entry baru diizinkan
+        self.armed = True                      # circuit breaker (reset = restart)
         self.warmup_until = time.time() + warmup_sec
+
+        # Kontrol runtime (control.json, hot-reload) + batas pengaman harian.
+        # Batas harian di-hardcode di runner — TIDAK bisa dilonggarkan oleh
+        # sesi supervisi melebihi angka di file kontrol yang kamu set.
+        self.control_armed = True              # false = pause entry via control
+        self.symbols_paused: set = set()
+        self.max_daily_loss_pct = 3.0          # loss hari ini ≥ % balance → blok
+        self.max_trades_per_day = 20
+        self.daily_trades = 0
+        self._daily_date = time.strftime("%Y-%m-%d")
+        self._daily_block = False
         self._busy = {s: False for s in self.symbols}
         self._lock = threading.Lock()
         self._consec_errors = 0
@@ -150,6 +164,22 @@ class HeadlessTrader:
         if not self.armed:
             logger.warning("🚫 DISARMED: sinyal dilewati — %s", desc)
             return
+        if not self.control_armed:
+            logger.info("⏸ CONTROL OFF: sinyal dilewati — %s", desc)
+            return
+        if symbol in self.symbols_paused:
+            logger.info("⏸ %s di-pause via control — sinyal dilewati", symbol)
+            return
+        self._roll_day()
+        if self._daily_block:
+            logger.warning("🚧 DAILY-LIMIT aktif: sinyal dilewati — %s", desc)
+            return
+        if self.max_trades_per_day > 0 and self.daily_trades >= self.max_trades_per_day:
+            self._daily_block = True
+            logger.critical("🚧 DAILY-LIMIT: %d trade/hari tercapai — entry "
+                            "baru diblokir sampai ganti hari",
+                            self.max_trades_per_day)
+            return
         with self._lock:
             if self._busy.get(symbol):
                 logger.info("⏭ Eksekusi %s masih berjalan — sinyal dilewati", symbol)
@@ -165,11 +195,23 @@ class HeadlessTrader:
                 if self.executor.has_open_position(symbol):
                     logger.info("⏭ Posisi %s masih terbuka — sinyal dilewati", symbol)
                     return
+                # Guard max loss harian — dicek di worker (network call live)
+                if self.max_daily_loss_pct > 0:
+                    pnl_today = self.executor.realized_pnl_today()
+                    bal = self.executor.get_balance()["balance"]
+                    if bal > 0 and pnl_today <= -bal * self.max_daily_loss_pct / 100.0:
+                        self._daily_block = True
+                        logger.critical(
+                            "🚧 DAILY-LIMIT: loss hari ini $%.2f ≥ %.1f%% "
+                            "balance ($%.2f) — entry baru diblokir sampai "
+                            "ganti hari", -pnl_today, self.max_daily_loss_pct, bal)
+                        return
                 prepared = self.executor.prepare_order(symbol, plan)
                 res = self.executor.execute(prepared, context)
                 if res.get("ok"):
                     self._consec_errors = 0
                     self.trades_opened += 1
+                    self.daily_trades += 1
                     # Slippage: sinkronkan plan engine ke harga fill aktual
                     fill = float(res.get("fill_price", 0.0) or 0.0)
                     if fill > 0 and self._rebase_cb:
@@ -258,6 +300,29 @@ class HeadlessTrader:
         threading.Thread(target=work, daemon=True,
                          name=f"setup-end-{symbol}").start()
 
+    # ── Batas harian ──────────────────────────────────────────────────
+
+    def _roll_day(self):
+        today = time.strftime("%Y-%m-%d")
+        if today != self._daily_date:
+            self._daily_date = today
+            self.daily_trades = 0
+            if self._daily_block:
+                logger.info("🌅 Ganti hari — daily limit direset, entry aktif lagi")
+            self._daily_block = False
+
+    def state_label(self, now: float) -> str:
+        if now < self.warmup_until:
+            return f"WARM-UP {self.warmup_until - now:.0f}s"
+        if not self.armed:
+            return "🛑 DISARMED"
+        if not self.control_armed:
+            return "⏸ OFF (control)"
+        self._roll_day()
+        if self._daily_block:
+            return "🚧 DAILY-LIMIT"
+        return "ARMED"
+
     # ── Circuit breaker ───────────────────────────────────────────────
 
     def _record_error(self, msg: str):
@@ -273,6 +338,111 @@ class HeadlessTrader:
             logger.critical("🛑 AUTO-ENTRY DINONAKTIFKAN — %s. Posisi terbuka "
                             "tetap dikelola (SL/TP/exit setup). Restart runner "
                             "untuk mengaktifkan kembali.", why)
+
+
+class ControlFile:
+    """control.json — setelan runtime yang bisa diubah TANPA restart runner
+    (hot-reload: mtime dicek tiap 5 s). Diedit manual, atau oleh sesi
+    supervisi terjadwal (Claude) yang menyetel bot mengikuti kondisi market.
+
+    Field:
+        armed              false = pause SEMUA entry baru (exit tetap dikelola)
+        direction          both | long | short | auto (bias 4H)
+        risk_pct           null = pakai .env/CLI; angka = override risk %
+        symbols_paused     entry symbol tertentu di-pause, mis. ["LABUSDT"]
+        max_daily_loss_pct loss hari ini ≥ % balance → blok entry s.d. besok
+        max_trades_per_day jumlah entry maksimum per hari
+        note               catatan bebas — kenapa disetel begini (masuk log)
+    """
+
+    def __init__(self, path: Path, engine: PulseEngine,
+                 trader: HeadlessTrader, executor: TradeExecutor):
+        self.path = Path(path)
+        self.engine = engine
+        self.trader = trader
+        self.executor = executor
+        self._mtime = 0.0
+        # risk saat runner start (.env/CLI) — risk_pct null = kembali ke ini
+        self._default_risk = executor.risk_pct
+
+    def ensure_exists(self, direction: str):
+        """Buat file dari nilai CLI bila belum ada. Bila sudah ada, isi
+        file yang menang atas CLI (di-apply lewat poll(force=True))."""
+        if self.path.exists():
+            return
+        cfg = {
+            "armed": True,
+            "direction": direction,
+            "risk_pct": None,
+            "symbols_paused": [],
+            "max_daily_loss_pct": 3.0,
+            "max_trades_per_day": 20,
+            "note": "dibuat otomatis oleh run_headless — edit kapan saja, "
+                    "reload otomatis tanpa restart",
+        }
+        self.path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False),
+                             encoding="utf-8")
+        logger.info("control.json dibuat: %s", self.path)
+
+    def poll(self, force: bool = False):
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            return
+        if not force and mtime == self._mtime:
+            return
+        self._mtime = mtime
+        try:
+            cfg = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.error("control.json tidak valid (%s) — setelan terakhir "
+                         "tetap dipakai", e)
+            return
+        self._apply(cfg)
+
+    def _apply(self, cfg: dict):
+        t = self.trader
+        t.control_armed = bool(cfg.get("armed", True))
+
+        d = str(cfg.get("direction") or "both").lower()
+        dval = d.upper() if d in ("long", "short", "auto") else "BOTH"
+        for eng in self.engine.entry_engines.values():
+            eng.direction_filter = dval
+
+        risk = cfg.get("risk_pct")
+        if risk is None:
+            self.executor.risk_pct = self._default_risk   # null = default .env/CLI
+        else:
+            try:
+                self.executor.risk_pct = max(0.1, float(risk))
+            except (TypeError, ValueError):
+                logger.warning("control.json: risk_pct %r tidak valid", risk)
+
+        t.symbols_paused = {str(s).upper() for s in
+                            (cfg.get("symbols_paused") or [])}
+        try:
+            t.max_daily_loss_pct = float(cfg.get("max_daily_loss_pct", 3.0))
+            t.max_trades_per_day = int(cfg.get("max_trades_per_day", 20))
+        except (TypeError, ValueError):
+            logger.warning("control.json: batas harian tidak valid — "
+                           "nilai lama dipertahankan")
+
+        note = str(cfg.get("note") or "")
+        logger.info(
+            "⚙ CONTROL reload: armed=%s · arah=%s · risk %.2f%% · pause=%s · "
+            "max loss %.1f%%/hari · max %d trade/hari%s",
+            t.control_armed, dval, self.executor.risk_pct,
+            sorted(t.symbols_paused) or "-",
+            t.max_daily_loss_pct, t.max_trades_per_day,
+            f" · note: {note}" if note else "")
+
+    async def watch(self, interval: float = 5.0):
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self.poll()
+            except Exception as e:
+                logger.warning("Control watch error: %s", e)
 
 
 async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
@@ -311,12 +481,12 @@ async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
             if count > 0 and last_t > 0 and now - last_t > 120:
                 logger.warning("⚠ Feed %s tidak menerima trade %.0f s — "
                                "cek koneksi", sym, now - last_t)
-        state = "ARMED" if trader.armed else "🛑 DISARMED"
-        if now < trader.warmup_until:
-            state = f"WARM-UP {trader.warmup_until - now:.0f}s"
-        logger.info("💓 %s | %.1f tick/s (target %.0f) | %s | open %d · closed %d",
-                    state, rate, target_rate, " · ".join(parts),
-                    trader.trades_opened, trader.trades_closed)
+        logger.info("💓 %s | %.1f tick/s (target %.0f) | %s | open %d · "
+                    "closed %d · hari ini %d/%d",
+                    trader.state_label(now), rate, target_rate,
+                    " · ".join(parts), trader.trades_opened,
+                    trader.trades_closed, trader.daily_trades,
+                    trader.max_trades_per_day)
         if rate < target_rate * 0.8:
             logger.warning(
                 "⚠ Tick rate %.1f/s < 80%% target — engine keteteran: cek CPU "
@@ -330,6 +500,11 @@ async def _amain(args, executor: TradeExecutor):
     trader = HeadlessTrader(
         executor, args.symbols, args.warmup,
         rebase_cb=lambda sym, px: engine.entry_engines[sym].rebase_active_plan(px))
+
+    # control.json — hot-reload setelan runtime (file menang atas CLI)
+    ctrl = ControlFile(CONTROL_FILE, engine, trader, executor)
+    ctrl.ensure_exists(args.direction)
+    ctrl.poll(force=True)
 
     engine.register_ui_callback(trader.on_tick)
     engine.register_feed_status_callback(
@@ -347,12 +522,14 @@ async def _amain(args, executor: TradeExecutor):
 
     engine.start()
     hb_task = asyncio.create_task(_heartbeat(engine, trader, args.heartbeat))
+    ctrl_task = asyncio.create_task(ctrl.watch())
     logger.info("Runner headless berjalan. Ctrl+C / SIGTERM untuk berhenti.")
     try:
         await stop_event.wait()
         logger.info("Sinyal berhenti diterima — shutdown…")
     finally:
         hb_task.cancel()
+        ctrl_task.cancel()
         await engine.stop()
         logger.info("Engine berhenti. Posisi TIDAK ditutup otomatis saat "
                     "shutdown — SL/TP di exchange tetap terpasang (live), "

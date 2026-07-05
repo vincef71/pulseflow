@@ -5,6 +5,7 @@
 *.log
 paper_trades*.json
 live_trades*.json
+control.json
 __pycache__/
 *.pyc
 data/

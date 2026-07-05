@@ -84,7 +84,31 @@ Opsi:
   terpasang di exchange (algo order), jadi posisi tetap terlindungi
   meskipun VPS mati.
 
-## 4. Service permanen (systemd)
+## 4. Kontrol runtime tanpa restart — `control.json`
+
+Saat runner start, `control.json` dibuat otomatis di root project (dari
+nilai CLI). Edit kapan saja — perubahan terbaca ≤ 5 detik (hot-reload),
+tanpa restart. File ini juga pintu masuk **sesi supervisi terjadwal**
+(Claude menyetel bot mengikuti kondisi market).
+
+```json
+{
+  "armed": true,              // false = pause SEMUA entry baru (exit tetap jalan)
+  "direction": "auto",        // both | long | short | auto (bias 4H)
+  "risk_pct": null,           // null = pakai .env; angka = override
+  "symbols_paused": ["LABUSDT"],  // pause entry symbol tertentu
+  "max_daily_loss_pct": 3.0,  // loss hari ini ≥ 3% balance → blok entry s.d. besok
+  "max_trades_per_day": 20,   // batas jumlah entry per hari
+  "note": "chop siang — short only"   // catatan bebas, masuk log
+}
+```
+
+Batas harian dicek oleh runner sendiri (bukan pihak luar): tembus max
+loss / max trade → status `🚧 DAILY-LIMIT`, entry baru diblokir sampai
+ganti hari (exit posisi terbuka tetap dikelola). Heartbeat menampilkan
+status + pemakaian kuota harian (`hari ini 3/20`).
+
+## 5. Service permanen (systemd)
 
 `/etc/systemd/system/pulseflow.service`:
 
