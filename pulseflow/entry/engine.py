@@ -112,6 +112,14 @@ class EntrySignalEngine:
     # (~0.1% notional) = 2R — mustahil profit. Di 0.5%, fee ≈ 0.2R.
     MIN_RISK_PCT       = 0.5
 
+    # Manajemen posisi (analisa live 5 Jul: 24/47 FADED ditutup saat gross
+    # profit; TP2 100% win; posisi >5m dibiarkan ke SL penuh = −$6.64).
+    # Profit ≥ 0.5R → event PARTIAL (executor tutup 50% + SL exchange ke BE),
+    # stop plan pindah ke entry, lalu sisa di-trail best ± mult×ATR-1m.
+    # Setelah BE: FADED diabaikan (exit via trail/TP2/FLIP), status RUNNER.
+    PARTIAL_AT_R       = 0.5     # trigger partial di 0.5× risk awal
+    TRAIL_ATR_MULT     = 2.0     # trailing stop = best ± 2×s_atr
+
     WHALE_BUCKET_SEC   = 5.0     # sampling whale_delta_usd_5s → bucket
     WHALE_BUCKETS      = 12      # 12 × 5 s = jendela 60 detik
 
@@ -249,7 +257,7 @@ class EntrySignalEngine:
         status = ""
 
         if self.phase == "ACTIVE":
-            status, ended = self._track_active(price, score, smooth_side, now)
+            status, ended = self._track_active(price, score, smooth_side, now, s_atr)
             if ended:
                 self.phase = "WAIT"
                 self.active_plan = None
@@ -525,21 +533,38 @@ class EntrySignalEngine:
             "rr2": float(round(rr2, 2)),
             "risk_pct": float(round(risk / entry_mid * 100.0, 3)),
             "tp1_hit": False,
+            # State manajemen posisi (mutasi selama ACTIVE)
+            "initial_stop": float(stop),   # untuk hitung R (stop bisa pindah)
+            "best": float(entry_mid),      # maximum favorable excursion
+            "be_moved": False,             # sudah partial + SL ke breakeven?
         }
 
     # ── Tracking setup aktif ──────────────────────────────────────────
 
-    def _track_active(self, price, score, smooth_side, now) -> Tuple[str, bool]:
-        """Return (status, ended)."""
+    def _track_active(self, price, score, smooth_side, now,
+                      s_atr: float = 0.0) -> Tuple[str, bool]:
+        """Return (status, ended).
+
+        Manajemen posisi: profit ≥ PARTIAL_AT_R × risk awal → event PARTIAL
+        (one-shot, stop pindah ke breakeven), lalu sisa posisi di-trail
+        best ± TRAIL_ATR_MULT × s_atr. Setelah BE, FADED tidak menutup —
+        exit lewat TRAIL (stop ter-trail tersentuh), TP2, atau FLIP.
+        """
         plan = self.active_plan
         if plan is None or price <= 0:
             return "", True
         sgn = 1.0 if plan["side"] == "LONG" else -1.0
         held = now - self.active_since
+        be_moved = bool(plan.get("be_moved", False))
 
-        # Stop tersentuh → invalid
+        # Best favorable price (MFE) — dasar trailing
+        if (price - plan.get("best", price)) * sgn > 0:
+            plan["best"] = float(price)
+
+        # Stop tersentuh → keluar. Pasca-BE stop sudah pindah (BE/trail):
+        # laporkan TRAIL supaya statistik memisahkannya dari stop awal.
         if (price - plan["stop"]) * sgn <= 0:
-            return "STOP", True
+            return ("TRAIL" if be_moved else "STOP"), True
 
         # TP tracking
         if (price - plan["tp2"]) * sgn >= 0:
@@ -547,12 +572,31 @@ class EntrySignalEngine:
         if not plan["tp1_hit"] and (price - plan["tp1"]) * sgn >= 0:
             plan["tp1_hit"] = True
 
-        # Arah flip keras
+        # Partial TP + breakeven (one-shot; SEBELUM trailing — skill
+        # position-manager: jangan trail sebelum posisi aman di BE)
+        risk = abs(plan["entry"] - plan.get("initial_stop", plan["stop"]))
+        if (not be_moved and risk > 0
+                and (plan["best"] - plan["entry"]) * sgn >= risk * self.PARTIAL_AT_R):
+            plan["be_moved"] = True
+            plan["stop"] = float(plan["entry"])   # SL → breakeven
+            self._drop_since = 0.0
+            return "PARTIAL", False
+
+        # Trailing stop — hanya setelah BE; stop hanya bergerak searah profit
+        if be_moved and s_atr > 0:
+            trail = plan["best"] - sgn * self.TRAIL_ATR_MULT * s_atr
+            if (trail - plan["stop"]) * sgn > 0:
+                plan["stop"] = float(trail)
+
+        # Arah flip keras — tetap menutup (pembalikan nyata, pre/pasca BE)
         if smooth_side != plan["side"] and score >= 40.0 and held >= self.MIN_HOLD_SEC:
             return "FLIP", True
 
-        # Skor layu terlalu lama
-        if score < self.DROP_SCORE:
+        # Skor layu terlalu lama — hanya pre-BE (setup gagal, cut cepat).
+        # Pasca-BE posisi runner: biarkan trail yang memutuskan exit.
+        if be_moved:
+            self._drop_since = 0.0
+        elif score < self.DROP_SCORE:
             if self._drop_since == 0.0:
                 self._drop_since = now
             elif now - self._drop_since > self.DROP_GRACE_SEC and held >= self.MIN_HOLD_SEC:
@@ -560,6 +604,8 @@ class EntrySignalEngine:
         else:
             self._drop_since = 0.0
 
+        if be_moved:
+            return "RUNNER", False
         return "TP1" if plan["tp1_hit"] else "", False
 
     # ── Instrumentasi ─────────────────────────────────────────────────

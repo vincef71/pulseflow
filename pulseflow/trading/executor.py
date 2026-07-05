@@ -407,6 +407,115 @@ class TradeExecutor:
     def is_tracked_live(self, symbol: str) -> bool:
         return self.to_binance_symbol(symbol) in self._live_tracked
 
+    def partial_close(self, symbol: str, exit_price: float, new_stop: float,
+                      fraction: float = 0.5) -> Dict[str, Any]:
+        """Event PARTIAL entry engine (profit ≥ 0.5R): tutup `fraction`
+        posisi + pindahkan SL ke breakeven (`new_stop` = harga entry).
+
+        Live: reduceOnly market → cancel semua algo order (SL awal + TP1,
+        TP1 closePosition konflik dengan trailing) → pasang STOP_MARKET
+        closePosition baru di BE. Bila SL baru GAGAL terpasang, sisa posisi
+        ditutup paksa (fail-safe — posisi tanpa SL tidak boleh hidup).
+        Trailing selanjutnya dikelola engine (exchange SL tetap di BE
+        sebagai lantai proteksi bila bot mati)."""
+        bsymbol = self.to_binance_symbol(symbol)
+
+        if self.paper_mode:
+            logs = self._read_paper_log()
+            n = 0
+            for t in logs:
+                if t.get("symbol") != bsymbol or t.get("status") != "PAPER_OPEN" \
+                        or t.get("be_moved"):
+                    continue
+                qty_p = float(t["quantity"]) * fraction
+                sgn = 1.0 if t["side"] == "LONG" else -1.0
+                gross = (float(exit_price) - float(t["entry"])) * qty_p * sgn
+                fee_p = float(exit_price) * qty_p * self.taker_fee_pct / 100.0
+                t["partial_pnl"] = round(t.get("partial_pnl", 0.0) + gross - fee_p, 4)
+                t["partial_exit"] = float(exit_price)
+                t["partial_at"] = datetime.now().isoformat(timespec="seconds")
+                t["quantity"] = round(float(t["quantity"]) - qty_p, 10)
+                t["stop"] = float(new_stop)      # BE — proteksi sisa posisi
+                t["be_moved"] = True
+                n += 1
+            if n:
+                self._write_paper_log(logs)
+                logger.info("📄 PAPER partial %s: %d posisi tutup %.0f%% @ %s, "
+                            "SL → BE", bsymbol, n, fraction * 100, exit_price)
+            return {"ok": True, "mode": "PAPER", "closed": n}
+
+        from binance.enums import SIDE_BUY, SIDE_SELL, FUTURE_ORDER_TYPE_MARKET
+        c = self.client()
+        pos = c.futures_position_information(symbol=bsymbol)
+        amt = float(pos[0]["positionAmt"]) if pos else 0.0
+        if amt == 0:
+            return {"ok": True, "mode": "LIVE", "note": "Tidak ada posisi"}
+        flt = self._filters(bsymbol)
+        step, tick = flt["stepSize"], flt["tickSize"]
+        exit_side = SIDE_SELL if amt > 0 else SIDE_BUY
+        result: Dict[str, Any] = {"ok": True, "mode": "LIVE"}
+
+        # 1. Tutup sebagian (skip bila hasil rounding < minQty — posisi
+        #    terlalu kecil untuk dibelah; BE + trail tetap jalan)
+        qty_p = _round_step(abs(amt) * fraction, step)
+        if qty_p >= flt["minQty"] and qty_p < abs(amt):
+            result["partial_order"] = c.futures_create_order(
+                symbol=bsymbol, side=exit_side,
+                type=FUTURE_ORDER_TYPE_MARKET,
+                quantity=_fmt(qty_p, step), reduceOnly=True)
+            result["closed_qty"] = qty_p
+        else:
+            result["note"] = "qty partial < minQty — hanya SL → BE"
+
+        # 2. SL → BE: cancel algo lama (SL awal + TP1) → pasang SL baru.
+        sl_s = _fmt(_round_step(float(new_stop), tick), tick) if tick else str(new_stop)
+        try:
+            self._cancel_all_conditional(bsymbol)
+        except Exception as e:
+            logger.warning("Cancel algo lama %s gagal: %s", bsymbol, e)
+        try:
+            result["sl_order"] = self._place_conditional(
+                bsymbol, exit_side, "STOP_MARKET", sl_s)
+        except Exception as e:
+            logger.error("SL BE GAGAL terpasang %s: %s — menutup sisa posisi "
+                         "(fail-safe)", bsymbol, e)
+            try:
+                pos2 = c.futures_position_information(symbol=bsymbol)
+                amt2 = float(pos2[0]["positionAmt"]) if pos2 else 0.0
+                if amt2 != 0:
+                    c.futures_create_order(
+                        symbol=bsymbol,
+                        side=SIDE_SELL if amt2 > 0 else SIDE_BUY,
+                        type=FUTURE_ORDER_TYPE_MARKET,
+                        quantity=_fmt(abs(amt2), step), reduceOnly=True)
+                result["failsafe"] = "Sisa posisi ditutup karena SL BE gagal"
+                self._live_tracked.discard(bsymbol)
+                self._mark_live_closed(bsymbol, "PARTIAL_FAILSAFE")
+            except Exception as e2:
+                result["failsafe"] = (f"KRITIS: SL BE gagal DAN tutup posisi "
+                                      f"gagal ({e2}) — TUTUP MANUAL SEKARANG")
+            result["ok"] = False
+            result["error"] = f"SL BE gagal: {e}"
+            return result
+
+        # 3. Jurnal live: catat partial di record yang masih terbuka
+        try:
+            logs = self._read_live_log()
+            for t in logs:
+                if t.get("symbol") == bsymbol and t.get("status") == "LIVE_OPEN":
+                    t["partial_at"] = datetime.now().isoformat(timespec="seconds")
+                    t["partial_price"] = float(exit_price)
+                    t["partial_qty"] = result.get("closed_qty", 0.0)
+                    t["stop"] = float(new_stop)
+                    t["be_moved"] = True
+            self._write_live_log(logs)
+        except Exception as e:
+            logger.warning("Update jurnal partial %s gagal: %s", bsymbol, e)
+
+        logger.info("🔴 LIVE partial %s: tutup %s @ ~%s, SL → BE %s",
+                    bsymbol, result.get("closed_qty", 0), exit_price, sl_s)
+        return result
+
     def close_live_trade(self, symbol: str, reason: str = "") -> Dict[str, Any]:
         """Setup engine berakhir (FADED/FLIP/STOP/TP2) → sinkronkan posisi
         LIVE milik sesi ini: tutup posisi (bila masih ada) + batalkan semua
@@ -474,7 +583,8 @@ class TradeExecutor:
     def close_paper_trades(self, symbol: str, exit_price: float,
                            reason: str) -> int:
         """Tutup semua posisi paper symbol ini saat setup berakhir.
-        Exit: STOP → harga stop, TP2 → harga tp2, FLIP/FADED → harga pasar.
+        Exit: STOP → harga stop, TP2 → harga tp2, FLIP/FADED/TRAIL → harga
+        pasar. pnl_usdt = NET (termasuk partial_pnl bila sempat partial TP).
         Mengisi pnl_usdt + result (WIN/LOSS) → statistik di paper_trades.json."""
         bsymbol = self.to_binance_symbol(symbol)
         logs = self._read_paper_log()
@@ -493,7 +603,8 @@ class TradeExecutor:
             gross = (exit_p - float(t["entry"])) * qty * sgn
             fee_open = float(t.get("fee_usdt", 0.0))
             fee_close = exit_p * qty * self.taker_fee_pct / 100.0
-            pnl = gross - fee_open - fee_close
+            # partial_pnl sudah net fee sisi partial-nya
+            pnl = gross - fee_open - fee_close + float(t.get("partial_pnl", 0.0))
             t["status"] = "PAPER_CLOSED"
             t["closed_at"] = datetime.now().isoformat(timespec="seconds")
             t["exit"] = float(exit_p)

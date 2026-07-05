@@ -71,6 +71,9 @@ Opsi:
 - **Gerbang LIVE ganda**: `PAPER_MODE=false` di `.env` saja tidak cukup —
   tanpa `--live` runner menolak start.
 - **Satu posisi per symbol** — fire saat posisi masih terbuka dilewati.
+- **Manajemen posisi**: profit ≥ 0.5R → tutup 50% + SL exchange pindah ke
+  breakeven; sisa posisi di-trail engine (best ± 2×ATR-1m, exit `TRAIL`).
+  Setelah breakeven, FADED tidak lagi menutup posisi (runner dibiarkan).
 - **Warm-up** — fire di detik-detik awal dilewati.
 - **Circuit breaker** — 3 error eksekusi beruntun → entry baru mati
   (DISARMED); exit posisi terbuka tetap dikelola. Restart untuk re-arm.

@@ -529,8 +529,10 @@ class PulseDashboard(QMainWindow):
         # paper = tutup + catat PnL net fee; live = tutup posisi milik sesi
         # ini + batalkan order sisa (strategi teruji = exit saat setup mati)
         ent = metrics.get("entry")
-        if ent and ent.get("status") in ("STOP", "TP2", "FLIP", "FADED"):
+        if ent and ent.get("status") in ("STOP", "TP2", "FLIP", "FADED", "TRAIL"):
             self._on_setup_end(symbol, ent)
+        elif ent and ent.get("status") == "PARTIAL":
+            self._on_partial(symbol, ent)
 
         # Update connection log trade stats
         count, last_time = self.engine.get_feed_stats(symbol)
@@ -638,6 +640,32 @@ class PulseDashboard(QMainWindow):
             except Exception as e:
                 self.exec_failed.emit(str(e))
         threading.Thread(target=work, daemon=True, name="exec-auto").start()
+
+    def _on_partial(self, symbol: str, entry: dict):
+        """Profit ≥ 0.5R → tutup 50% posisi + SL ke breakeven (paper & live;
+        live hanya posisi milik sesi ini). Sisa posisi di-trail engine."""
+        plan = entry.get("plan") or {}
+        price = float(entry.get("price", 0.0))
+        be_stop = float(plan.get("stop", 0.0))   # engine sudah set = entry
+        if price <= 0 or be_stop <= 0:
+            return
+        if not self.executor.paper_mode and not self.executor.is_tracked_live(symbol):
+            return
+
+        def work():
+            try:
+                res = self.executor.partial_close(symbol, price, be_stop)
+                if res.get("ok"):
+                    self.exec_note.emit(
+                        f"🎯 PARTIAL {symbol}: 50% ditutup @ ~{price:,.6g} — "
+                        f"SL → BE, sisa trailing")
+                else:
+                    self.exec_note.emit(
+                        f"⚠ PARTIAL {symbol} GAGAL: {res.get('error', '?')} — "
+                        f"{res.get('failsafe', '')}")
+            except Exception as e:
+                self.exec_note.emit(f"⚠ PARTIAL {symbol} error: {e}")
+        threading.Thread(target=work, daemon=True, name="partial").start()
 
     def _on_setup_end(self, symbol: str, entry: dict):
         """Setup berakhir (STOP/TP2/FLIP/FADED) → tutup posisi symbol ini.

@@ -6,8 +6,10 @@ velocity, battle, liquidity, macro, entry) lalu mereplikasi logika
 auto-trade dashboard tanpa PyQt6:
 
   • entry.new_fire                     → prepare_order + execute
-  • entry.status STOP/TP2/FLIP/FADED   → tutup posisi symbol itu
-        paper : close_paper_trades (PnL net fee dicatat)
+  • entry.status PARTIAL               → tutup 50% + SL → breakeven,
+        sisa posisi di-trail engine (best ± 2×ATR-1m)
+  • entry.status STOP/TP2/FLIP/FADED/TRAIL → tutup posisi symbol itu
+        paper : close_paper_trades (PnL net fee + partial_pnl dicatat)
         live  : close_live_trade — HANYA posisi yang dibuka sesi ini
 
 Pengaman (pengganti dialog konfirmasi GUI):
@@ -93,7 +95,7 @@ threading.excepthook = _log_thread_uncaught
 sys.unraisablehook = _log_unraisable
 
 
-END_STATUSES = ("STOP", "TP2", "FLIP", "FADED")
+END_STATUSES = ("STOP", "TP2", "FLIP", "FADED", "TRAIL")
 MAX_CONSEC_EXEC_ERRORS = 3
 
 
@@ -124,8 +126,11 @@ class HeadlessTrader:
         if entry.get("new_fire"):
             self._on_fire(symbol, entry)
 
-        if entry.get("status") in END_STATUSES:
+        status = entry.get("status")
+        if status in END_STATUSES:
             self._on_setup_end(symbol, entry)
+        elif status == "PARTIAL":
+            self._on_partial(symbol, entry)
 
     # ── Entry baru ────────────────────────────────────────────────────
 
@@ -182,6 +187,34 @@ class HeadlessTrader:
                     self._busy[symbol] = False
         threading.Thread(target=work, daemon=True,
                          name=f"exec-{symbol}").start()
+
+    # ── Partial TP: profit ≥ 0.5R → tutup 50% + SL ke breakeven ───────
+
+    def _on_partial(self, symbol: str, entry: dict):
+        plan = entry.get("plan") or {}
+        price = float(entry.get("price", 0.0))
+        be_stop = float(plan.get("stop", 0.0))   # engine sudah set = entry
+        if price <= 0 or be_stop <= 0:
+            return
+        if not self.executor.paper_mode and not self.executor.is_tracked_live(symbol):
+            return   # posisi bukan milik sesi ini — jangan disentuh
+
+        def work():
+            try:
+                res = self.executor.partial_close(symbol, price, be_stop)
+                if res.get("ok"):
+                    logger.info("🎯 PARTIAL %s: %s — sisa posisi trailing",
+                                symbol, res.get("note") or
+                                f"tutup {res.get('closed_qty', res.get('closed', ''))} @ ~{price:,.6g}, SL → BE")
+                else:
+                    self._record_error(
+                        f"partial {symbol} gagal: {res.get('error', res)}")
+                    if "KRITIS" in str(res.get("failsafe", "")):
+                        self._disarm("fail-safe KRITIS saat partial — cek posisi manual")
+            except Exception as e:
+                self._record_error(f"partial {symbol} error: {e}")
+        threading.Thread(target=work, daemon=True,
+                         name=f"partial-{symbol}").start()
 
     # ── Setup berakhir → sinkronkan posisi ────────────────────────────
 

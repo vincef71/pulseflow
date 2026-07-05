@@ -275,6 +275,10 @@ class EntrySignalCard(QFrame):
             sub = "Setup AKTIF — plan terkunci di chart"
             if status == "TP1":
                 sub = "TP1 tercapai ✓ — sisa posisi menuju TP2"
+            elif status == "PARTIAL":
+                sub = "PARTIAL ✓ 50% profit dikunci — SL → breakeven"
+            elif status == "RUNNER":
+                sub = "RUNNER 🏃 — SL trailing di belakang harga"
         elif phase == "FORMING" and side:
             self.verdict.setText(f"◔ {side} TERBENTUK…")
             col = side_col
