@@ -247,12 +247,16 @@ async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
         last_ticks, last_t = ticks, now
         parts = []
         for sym in engine.symbols:
-            price = engine.tickers[sym].last_price
+            ticker = engine.tickers[sym]
+            price = ticker.last_price
             ent = trader.last_entry.get(sym) or {}
             count, last_t = engine.get_feed_stats(sym)
             side = ent.get("side") or "-"
+            # Ambang whale LARGE efektif ("*" = adaptif, tanpa = statis)
+            wthr = ticker.whale_large_threshold
+            wmark = "*" if ticker.whale_adaptive else ""
             parts.append(f"{sym} {price:,.6g} [{ent.get('phase', '?')} "
-                         f"{side} {ent.get('score', 0)}]")
+                         f"{side} {ent.get('score', 0)}] wh ${wthr / 1000:,.3g}K{wmark}")
             if count > 0 and last_t > 0 and now - last_t > 120:
                 logger.warning("⚠ Feed %s tidak menerima trade %.0f s — "
                                "cek koneksi", sym, now - last_t)

@@ -111,6 +111,7 @@ class FlowPanel(QFrame):
         self._lbl_quality  = self._stat_row(layout, "SIGNAL QUALITY", "—")
         self._lbl_wdelta   = self._stat_row(layout, "WHALE DELTA",    "—")
         self._lbl_wpct     = self._stat_row(layout, "WHALE VOL %",    "—")
+        self._lbl_wthr     = self._stat_row(layout, "WHALE THR",      "—")
         self._lbl_p70      = self._stat_row(layout, "P70 THRESHOLD",  "—")
 
         layout.addStretch()
@@ -191,6 +192,22 @@ class FlowPanel(QFrame):
         )
         self._lbl_wpct.setStyleSheet(
             f"color: {wpct_color}; font-family: 'Consolas', monospace; font-size: 11px;"
+        )
+
+        # Whale LARGE threshold (adaptif P99 per-symbol / statis saat warm-up)
+        wthr = float(flow.get("whale_thr_large", 0.0))
+        adaptive = bool(flow.get("whale_adaptive", False))
+        if wthr >= 1_000_000:
+            wthr_str = f"${wthr / 1_000_000:.2f}M"
+        elif wthr >= 1_000:
+            wthr_str = f"${wthr / 1_000:.1f}K"
+        else:
+            wthr_str = f"${wthr:.0f}"
+        mode = "adaptif P99" if adaptive else "statis · warm-up"
+        self._lbl_wthr.setText(f"{wthr_str}  ≥ LARGE  ({mode})")
+        wthr_color = COLORS["accent"] if adaptive else COLORS["text_muted"]
+        self._lbl_wthr.setStyleSheet(
+            f"color: {wthr_color}; font-family: 'Consolas', monospace; font-size: 11px;"
         )
 
         # P70 adaptive threshold
