@@ -23,7 +23,7 @@ Fed by `metrics["entry"]` (EntrySignalEngine output).
 """
 
 from PyQt6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
-                             QLabel, QProgressBar, QPushButton)
+                             QLabel, QProgressBar, QPushButton, QComboBox)
 from PyQt6.QtCore import Qt, pyqtSignal
 from pulseflow.ui.styles import COLORS
 
@@ -44,6 +44,11 @@ class EntrySignalCard(QFrame):
     execute_requested = pyqtSignal(dict)
     # User klik toggle auto-trade; dashboard yang konfirmasi & memfinalkan
     auto_toggle_requested = pyqtSignal(bool)
+    # User ganti filter arah entry: "BOTH" | "LONG" | "SHORT" | "AUTO"
+    direction_changed = pyqtSignal(str)
+
+    _DIR_OPTIONS = [("SEMUA", "BOTH"), ("LONG only", "LONG"),
+                    ("SHORT only", "SHORT"), ("AUTO (bias 4H)", "AUTO")]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -132,6 +137,31 @@ class EntrySignalCard(QFrame):
             self.plan_rows[key] = v
         plan_grid.setColumnStretch(1, 1)
         root.addLayout(plan_grid)
+
+        # ── Filter arah entry + bias 4H ──────────────────────────────
+        dir_row = QHBoxLayout()
+        dir_row.setSpacing(6)
+        dir_lbl = QLabel("ARAH", self)
+        dir_lbl.setStyleSheet(
+            f"font-size: 10px; font-weight: bold; color: {_MUTED}; letter-spacing: 1px;")
+        dir_row.addWidget(dir_lbl)
+
+        self.dir_combo = QComboBox(self)
+        for label, _val in self._DIR_OPTIONS:
+            self.dir_combo.addItem(label)
+        self.dir_combo.setStyleSheet(
+            "QComboBox { background: #16161c; color: #e8e8f0; border: 1px solid #2d2d38;"
+            " border-radius: 4px; padding: 2px 8px; font-size: 11px; }")
+        self.dir_combo.currentIndexChanged.connect(
+            lambda i: self.direction_changed.emit(self._DIR_OPTIONS[i][1]))
+        dir_row.addWidget(self.dir_combo, 1)
+
+        self.bias4h_lbl = QLabel("4H: —", self)
+        self.bias4h_lbl.setStyleSheet(
+            f"font-size: 11px; font-weight: bold; color: {_MUTED};"
+            " font-family: 'Consolas', monospace;")
+        dir_row.addWidget(self.bias4h_lbl)
+        root.addLayout(dir_row)
 
         # ── Tombol eksekusi (aktif hanya saat setup ACTIVE + plan) ───
         self.exec_btn = QPushButton("🚀 EKSEKUSI (PAPER)", self)
@@ -251,6 +281,22 @@ class EntrySignalCard(QFrame):
         self.warn_lbl.setText("")
         self._last_entry = None
         self.exec_btn.setEnabled(False)
+
+    def update_bias4h(self, b4: dict | None):
+        """Refresh label bias 4H (symbol fokus)."""
+        if not b4 or not b4.get("ready"):
+            self.bias4h_lbl.setText("4H: …")
+            self.bias4h_lbl.setStyleSheet(
+                f"font-size: 11px; font-weight: bold; color: {_MUTED};"
+                " font-family: 'Consolas', monospace;")
+            return
+        trend, bias = b4.get("trend", "FLAT"), float(b4.get("bias", 0.0))
+        arrow = {"UP": "▲", "DOWN": "▼"}.get(trend, "─")
+        col = _GREEN if trend == "UP" else _RED if trend == "DOWN" else _MUTED
+        self.bias4h_lbl.setText(f"4H: {arrow} {trend} {bias:+.2f}")
+        self.bias4h_lbl.setStyleSheet(
+            f"font-size: 11px; font-weight: bold; color: {col};"
+            " font-family: 'Consolas', monospace;")
 
     # ── Update ────────────────────────────────────────────────────────
 

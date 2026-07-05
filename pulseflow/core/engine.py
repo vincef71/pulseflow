@@ -13,6 +13,7 @@ from pulseflow.liquidity.macro_engine import MacroLiquidityEngine
 from pulseflow.entry.engine import EntrySignalEngine
 from pulseflow.analytics.daily_atr import DailyATRTracker
 from pulseflow.analytics.context import MarketContextTracker
+from pulseflow.analytics.htf_bias import HTFBiasTracker
 from pulseflow.storage.parquet_writer import ParquetWriter
 from pulseflow.feeds.hyperliquid import HyperliquidFeed
 from pulseflow.feeds.binance import BinanceFeed
@@ -39,6 +40,7 @@ class PulseEngine:
         self.entry_engines: Dict[str, EntrySignalEngine] = {}
         self.daily_atr: Dict[str, DailyATRTracker] = {}
         self.context_trackers: Dict[str, MarketContextTracker] = {}
+        self.htf_bias: Dict[str, HTFBiasTracker] = {}
         self.feeds: Dict[str, List[Any]] = {}
         
         # Storage
@@ -76,6 +78,7 @@ class PulseEngine:
             self.entry_engines[symbol] = EntrySignalEngine(symbol=symbol)
             self.daily_atr[symbol] = DailyATRTracker(period=DAILY_ATR_CONFIG["period"])
             self.context_trackers[symbol] = MarketContextTracker(symbol=symbol)
+            self.htf_bias[symbol] = HTFBiasTracker(symbol=symbol)
             self.feeds[symbol] = []
 
     def register_ui_callback(self, callback: Callable[[str, Dict[str, Any], List[Dict[str, Any]]], None]):
@@ -133,6 +136,7 @@ class PulseEngine:
         if self.mode in ("binance", "hyperliquid"):
             for symbol in self.symbols:
                 self.context_trackers[symbol].seed_history_async()
+                self.htf_bias[symbol].start()   # REST 4h, refresh berkala
 
         # Start feeds
         for symbol in self.symbols:
@@ -270,6 +274,9 @@ class PulseEngine:
                 # Konteks klines 1m (bias trend, ATR struktural, swing levels)
                 metrics["context"] = self.context_trackers[symbol].snapshot(ticker.last_price)
 
+                # Bias trend 4H (REST, refresh 5 menit) — filter arah entry
+                metrics["bias_4h"] = self.htf_bias[symbol].snapshot()
+
                 # Predict BIG liquidity pools (macro magnets, far-reaching)
                 metrics["macro_liquidity"] = self.macro_liquidity_engines[symbol].update(
                     ticker.last_price, metrics.get("daily_atr")
@@ -314,6 +321,8 @@ class PulseEngine:
 
     async def stop(self):
         self.is_running = False
+        for tracker in self.htf_bias.values():
+            tracker.stop()
         # Stop all feeds
         for feeds_list in self.feeds.values():
             for feed in feeds_list:

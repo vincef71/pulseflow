@@ -371,6 +371,7 @@ class PulseDashboard(QMainWindow):
         # Alur eksekusi order: tombol card → siapkan → konfirmasi → eksekusi
         self.entry_card.set_exec_mode("PAPER" if self.executor.paper_mode else "LIVE")
         self.entry_card.execute_requested.connect(self._on_execute_requested)
+        self.entry_card.direction_changed.connect(self._on_direction_changed)
         self.entry_card.auto_toggle_requested.connect(self._on_auto_toggle)
         self.exec_summary_ready.connect(self._on_exec_summary)
         self.exec_done.connect(self._on_exec_done)
@@ -497,6 +498,7 @@ class PulseDashboard(QMainWindow):
             self.chart.update_data(real_price, metrics)
             entry = metrics.get("entry")
             self.entry_card.update_entry(entry)
+            self.entry_card.update_bias4h(metrics.get("bias_4h"))
             # Setup entry baru menyala → ping supaya tidak terlewat
             if entry and entry.get("new_fire"):
                 self._play_ping()
@@ -641,6 +643,13 @@ class PulseDashboard(QMainWindow):
             except Exception as e:
                 self.exec_failed.emit(str(e))
         threading.Thread(target=work, daemon=True, name="exec-auto").start()
+
+    def _on_direction_changed(self, value: str):
+        """Filter arah entry (SEMUA/LONG/SHORT/AUTO bias-4H) — berlaku untuk
+        SEMUA symbol yang dilacak, hanya menahan fire baru."""
+        for eng in self.engine.entry_engines.values():
+            eng.direction_filter = value
+        self.statusBar().showMessage(f"🧭 Filter arah entry: {value}", 10000)
 
     def _on_partial(self, symbol: str, entry: dict):
         """Profit ≥ 0.5R → tutup 50% posisi + SL ke breakeven (paper & live;

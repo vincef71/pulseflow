@@ -299,8 +299,15 @@ async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
             # Ambang whale LARGE efektif ("*" = adaptif, tanpa = statis)
             wthr = ticker.whale_large_threshold
             wmark = "*" if ticker.whale_adaptive else ""
+            # Bias 4H: ▲ UP / ▼ DOWN / ─ FLAT (? = belum siap)
+            b4 = engine.htf_bias[sym].snapshot()
+            if b4.get("ready"):
+                b4s = {"UP": "▲", "DOWN": "▼"}.get(b4["trend"], "─") + f"{b4['bias']:+.2f}"
+            else:
+                b4s = "?"
             parts.append(f"{sym} {price:,.6g} [{ent.get('phase', '?')} "
-                         f"{side} {ent.get('score', 0)}] wh ${wthr / 1000:,.3g}K{wmark}")
+                         f"{side} {ent.get('score', 0)}] 4h {b4s} "
+                         f"wh ${wthr / 1000:,.3g}K{wmark}")
             if count > 0 and last_t > 0 and now - last_t > 120:
                 logger.warning("⚠ Feed %s tidak menerima trade %.0f s — "
                                "cek koneksi", sym, now - last_t)
@@ -318,6 +325,8 @@ async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
 
 async def _amain(args, executor: TradeExecutor):
     engine = PulseEngine(mode=args.mode, symbols=args.symbols)
+    for eng in engine.entry_engines.values():
+        eng.direction_filter = args.direction.upper() if args.direction != "both" else "BOTH"
     trader = HeadlessTrader(
         executor, args.symbols, args.warmup,
         rebase_cb=lambda sym, px: engine.entry_engines[sym].rebase_active_plan(px))
@@ -364,6 +373,10 @@ def _parse_args():
                         "PAPER_MODE=false di .env)")
     p.add_argument("--paper", action="store_true",
                    help="paksa paper mode, abaikan PAPER_MODE di .env")
+    p.add_argument("--direction", choices=["both", "long", "short", "auto"],
+                   default="both",
+                   help="filter arah entry: long/short only, atau auto = "
+                        "hanya searah bias trend 4H (default: both)")
     p.add_argument("--risk", type=float, default=None, metavar="PCT",
                    help="override risk %% per trade (default: RISK_PCT .env)")
     p.add_argument("--warmup", type=float, default=90.0, metavar="SEC",
@@ -403,10 +416,11 @@ def main():
 
     logger.info(
         "PulseFlow HEADLESS start — mode data: %s · symbols: %s · exec: %s · "
-        "risk %.2f%%/trade · leverage %dx · warmup %.0fs",
+        "risk %.2f%%/trade · leverage %dx · warmup %.0fs · arah: %s",
         args.mode, ", ".join(args.symbols),
         "PAPER" if executor.paper_mode else "🔴 LIVE",
-        executor.risk_pct, executor.leverage, args.warmup)
+        executor.risk_pct, executor.leverage, args.warmup,
+        args.direction.upper())
 
     try:
         asyncio.run(_amain(args, executor))

@@ -130,6 +130,11 @@ class EntrySignalEngine:
         self._whale_thr = WHALE_THRESHOLDS_USD["LARGE"].get(
             symbol, WHALE_THRESHOLDS_USD["LARGE"]["__default__"])
 
+        # Filter arah entry: BOTH | LONG | SHORT | AUTO (ikut bias 4H).
+        # Hanya menahan FIRE baru — setup ACTIVE yang sudah hidup tidak
+        # dipaksa tutup saat filter berubah.
+        self.direction_filter = "BOTH"
+
         # Skor ter-smooth signed: >0 bias LONG, <0 bias SHORT
         self._sscore = 0.0
         self._side_ticks = 0
@@ -265,8 +270,13 @@ class EntrySignalEngine:
                 self._ended_at = now
         if self.phase != "ACTIVE":
             in_cooldown = (now - self._ended_at) < self.REFIRE_COOLDOWN
+            dir_ok = self._dir_allowed(smooth_side, metrics.get("bias_4h"))
+            if not dir_ok and score >= self.FORMING_SCORE:
+                warnings.append(
+                    f"Arah {smooth_side} ditahan (filter {self.direction_filter})")
             if (score >= self.FIRE_SCORE and side == smooth_side
                     and self._side_ticks >= self.SIDE_STABLE_TICKS
+                    and dir_ok
                     and not in_cooldown):
                 plan = self._build_plan(smooth_side, price, s_atr, liquidity, macro, context)
                 if plan is not None and plan["rr1"] >= self.MIN_RR:
@@ -309,6 +319,7 @@ class EntrySignalEngine:
             "status": status,
             "warnings": warnings,
             "new_fire": new_fire,
+            "dir_filter": self.direction_filter,
             "price": float(price),
             "ts": now,
         }
@@ -538,6 +549,26 @@ class EntrySignalEngine:
             "best": float(entry_mid),      # maximum favorable excursion
             "be_moved": False,             # sudah partial + SL ke breakeven?
         }
+
+    # ── Filter arah entry ─────────────────────────────────────────────
+
+    def _dir_allowed(self, side: Optional[str], bias_4h=None) -> bool:
+        """Apakah fire ke arah `side` diizinkan oleh direction_filter.
+        AUTO: hanya searah trend bias 4H; 4H FLAT/belum siap = bebas."""
+        if side not in ("LONG", "SHORT"):
+            return True
+        f = self.direction_filter
+        if f == "LONG":
+            return side == "LONG"
+        if f == "SHORT":
+            return side == "SHORT"
+        if f == "AUTO":
+            b = bias_4h or {}
+            trend = b.get("trend", "FLAT")
+            if not b.get("ready") or trend == "FLAT":
+                return True
+            return (trend == "UP") == (side == "LONG")
+        return True
 
     # ── Rebase plan ke harga fill exchange ────────────────────────────
 
