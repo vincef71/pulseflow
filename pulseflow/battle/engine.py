@@ -159,7 +159,10 @@ class BattleStateEngine:
 
         # ── Whale support → morale ────────────────────────────────────────────
         whale_delta = float(flow.get("whale_delta_usd_5s", 0.0))
-        whale_thr = WHALE_THRESHOLDS_USD["LARGE"].get(self.symbol, WHALE_THRESHOLDS_USD["LARGE"]["__default__"])
+        # Ambang adaptif per-symbol dari classifier (persentil rolling);
+        # tabel statis hanya fallback saat metrics belum membawa nilainya.
+        whale_thr = float(flow.get("whale_thr_large", 0.0)) or \
+            WHALE_THRESHOLDS_USD["LARGE"].get(self.symbol, WHALE_THRESHOLDS_USD["LARGE"]["__default__"])
         whale_buy_support = 1.0 if whale_delta > whale_thr * 0.25 else 0.0
         whale_sell_support = 1.0 if whale_delta < -whale_thr * 0.25 else 0.0
 

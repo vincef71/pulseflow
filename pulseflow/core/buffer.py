@@ -119,6 +119,15 @@ class MarketTicker:
         self._whale_classifier  = WhaleClassifier(symbol)
         self._percentile_filter = PercentileFilter()
 
+    @property
+    def whale_large_threshold(self) -> float:
+        """Ambang LARGE efektif (adaptif per-symbol bila sudah warm)."""
+        return self._whale_classifier.large
+
+    @property
+    def whale_adaptive(self) -> bool:
+        return self._whale_classifier.is_adaptive
+
     # ── Trade ingestion ───────────────────────────────────────────────
 
     def add_trade(self, price: float, volume: float, is_buyer_maker: bool):

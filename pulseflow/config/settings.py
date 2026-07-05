@@ -98,6 +98,20 @@ WHALE_THRESHOLDS_USD = {
     "BLOCK":  {"BTCUSDT": 500_000, "ETHUSDT": 200_000, "XAUUSDT": 500_000, "HYPEUSDT": 100_000, "__default__": 50_000},
 }
 
+# Whale ADAPTIF — ambang tier dihitung dari persentil rolling notional
+# per-symbol, supaya definisi "whale" relatif terhadap aliran symbol itu
+# sendiri (BTC vs coin mikro sama-sama benar) dan ikut likuiditas sesi.
+# WHALE_THRESHOLDS_USD tetap dipakai sebagai fallback saat warm-up; floor
+# absolut mencegah coin super-sepi melabeli trade receh sebagai whale.
+WHALE_ADAPTIVE = {
+    "enabled": True,
+    "window_trades":   2000,   # sampel rolling notional per symbol
+    "warmup_trades":    500,   # di bawah ini pakai tabel statis
+    "recompute_every":  100,   # hitung ulang persentil tiap N trade
+    "percentiles": {"MEDIUM": 95.0, "LARGE": 99.0, "BLOCK": 99.9},
+    "floors_usd":  {"MEDIUM": 500.0, "LARGE": 2_000.0, "BLOCK": 10_000.0},
+}
+
 # Adaptive percentile filter — keep trades above this percentile of recent notionals
 PERCENTILE_FILTER = {
     "window_trades": 500,  # rolling sample size for P-value computation

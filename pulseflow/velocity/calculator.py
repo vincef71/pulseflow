@@ -171,6 +171,8 @@ class VelocityCalculator:
                 "p70_threshold": self.ticker._percentile_filter.threshold,
                 "whale_delta_usd_5s": 0.0,
                 "whale_volume_5s":    0.0,
+                "whale_thr_large":  self.ticker.whale_large_threshold,
+                "whale_adaptive":   self.ticker.whale_adaptive,
                 "small_usd_5s":   0.0, "medium_usd_5s": 0.0,
                 "large_usd_5s":   0.0, "block_usd_5s":  0.0,
             }
@@ -205,6 +207,8 @@ class VelocityCalculator:
             "p70_threshold":     self.ticker._percentile_filter.threshold,
             "whale_delta_usd_5s": whale_delta_usd,
             "whale_volume_5s":    whale_volume_usd,
+            "whale_thr_large":   self.ticker.whale_large_threshold,
+            "whale_adaptive":    self.ticker.whale_adaptive,
             "small_usd_5s":  float(sums[0]),
             "medium_usd_5s": float(sums[1]),
             "large_usd_5s":  float(sums[2]),

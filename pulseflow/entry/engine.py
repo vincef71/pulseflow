@@ -184,7 +184,11 @@ class EntrySignalEngine:
         s_atr = atr_1m if (ctx_ready and atr_1m > 0) else 2.5 * tick_atr
 
         # ── Whale flow 60 s ──────────────────────────────────────────
-        whale_5s = float(metrics.get("flow_composition", {}).get("whale_delta_usd_5s", 0.0))
+        flow_comp = metrics.get("flow_composition", {})
+        whale_5s = float(flow_comp.get("whale_delta_usd_5s", 0.0))
+        # Ambang LARGE adaptif per-symbol; nilai init statis jadi fallback
+        # sampai metrics membawa ambang dari classifier.
+        self._whale_thr = float(flow_comp.get("whale_thr_large", 0.0)) or self._whale_thr
         if now - self._whale_bucket_ts >= self.WHALE_BUCKET_SEC:
             self._whale_buckets.append(whale_5s)
             self._whale_bucket_ts = now
