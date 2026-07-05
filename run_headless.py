@@ -46,7 +46,7 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-from pulseflow.config.settings import DEFAULT_SYMBOLS
+from pulseflow.config.settings import DEFAULT_SYMBOLS, TICK_INTERVAL_MS
 from pulseflow.core.engine import PulseEngine
 from pulseflow.trading.executor import TradeExecutor
 
@@ -234,9 +234,17 @@ class HeadlessTrader:
 async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
                      interval: float):
     """Log ringkas kondisi tiap symbol + status runner secara berkala."""
+    # Diagnostik tick rate: target = 1000/TICK_INTERVAL_MS (10/s default).
+    # Jauh di bawah target = loop engine tidak mengejar (CPU lemah / steal
+    # vCPU / swap RAM) → sinyal telat lahir & telat mati.
+    target_rate = 1000.0 / TICK_INTERVAL_MS
+    last_ticks, last_t = engine.tick_count, time.time()
     while True:
         await asyncio.sleep(interval)
         now = time.time()
+        ticks = engine.tick_count
+        rate = (ticks - last_ticks) / max(now - last_t, 1e-9)
+        last_ticks, last_t = ticks, now
         parts = []
         for sym in engine.symbols:
             price = engine.tickers[sym].last_price
@@ -251,9 +259,13 @@ async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
         state = "ARMED" if trader.armed else "🛑 DISARMED"
         if now < trader.warmup_until:
             state = f"WARM-UP {trader.warmup_until - now:.0f}s"
-        logger.info("💓 %s | %s | open %d · closed %d",
-                    state, " · ".join(parts),
+        logger.info("💓 %s | %.1f tick/s (target %.0f) | %s | open %d · closed %d",
+                    state, rate, target_rate, " · ".join(parts),
                     trader.trades_opened, trader.trades_closed)
+        if rate < target_rate * 0.8:
+            logger.warning(
+                "⚠ Tick rate %.1f/s < 80%% target — engine keteteran: cek CPU "
+                "(steal vCPU?) / RAM swap, atau kurangi jumlah symbol", rate)
 
 
 async def _amain(args, executor: TradeExecutor):

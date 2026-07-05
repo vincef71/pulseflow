@@ -110,6 +110,12 @@ class PulseEngine:
             if callback in self._depth_callbacks:
                 self._depth_callbacks.remove(callback)
 
+    @property
+    def tick_count(self) -> int:
+        """Jumlah iterasi loop engine sejak start — untuk diagnostik tick rate
+        (target 1000/TICK_INTERVAL_MS per detik; lebih rendah = CPU keteteran)."""
+        return self._tick_counter
+
     def get_feed_stats(self, symbol: str):
         """Returns (trade_count, last_trade_time) for the primary feed of a symbol."""
         feeds = self.feeds.get(symbol, [])
