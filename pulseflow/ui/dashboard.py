@@ -632,6 +632,7 @@ class PulseDashboard(QMainWindow):
                 res = self.executor.execute(
                     prepared,
                     {k: entry.get(k) for k in ("setup", "score", "grade")})
+                self._rebase_after_fill(symbol, res)
                 res["auto"] = True
                 res["summary"] = (f"{prepared['side']} {prepared['symbol']} "
                                   f"qty {prepared['quantity']} @ ~{prepared['entry']:,.6g} "
@@ -716,8 +717,9 @@ class PulseDashboard(QMainWindow):
         self._exec_was_auto = False
         # Konteks setup untuk jurnal (dipakai saat eksekusi setelah konfirmasi)
         self._exec_context = {k: entry.get(k) for k in ("setup", "score", "grade")}
-        self.entry_card.exec_btn.setEnabled(False)
         symbol = self.current_focus_symbol
+        self._exec_symbol = symbol   # untuk rebase plan setelah fill
+        self.entry_card.exec_btn.setEnabled(False)
         self.statusBar().showMessage(f"Menyiapkan order {symbol}…")
 
         def work():
@@ -767,11 +769,25 @@ class PulseDashboard(QMainWindow):
 
         def work():
             try:
-                self.exec_done.emit(
-                    self.executor.execute(p, getattr(self, "_exec_context", None)))
+                res = self.executor.execute(p, getattr(self, "_exec_context", None))
+                self._rebase_after_fill(
+                    getattr(self, "_exec_symbol", self.current_focus_symbol), res)
+                self.exec_done.emit(res)
             except Exception as e:
                 self.exec_failed.emit(str(e))
         threading.Thread(target=work, daemon=True, name="exec-order").start()
+
+    def _rebase_after_fill(self, symbol: str, res: dict):
+        """Order live terisi dengan slippage → geser plan engine ke harga
+        fill supaya partial/trailing/status dihitung dari entry sebenarnya
+        (SL/TP di exchange sudah digeser oleh executor)."""
+        try:
+            fill = float(res.get("fill_price", 0.0) or 0.0)
+            eng = self.engine.entry_engines.get(symbol)
+            if res.get("ok") and fill > 0 and eng is not None:
+                eng.rebase_active_plan(fill)
+        except Exception:
+            pass
 
     def _on_exec_done(self, res: dict):
         self._exec_busy = False

@@ -539,6 +539,30 @@ class EntrySignalEngine:
             "be_moved": False,             # sudah partial + SL ke breakeven?
         }
 
+    # ── Rebase plan ke harga fill exchange ────────────────────────────
+
+    def rebase_active_plan(self, fill_price: float):
+        """Dipanggil executor/runner setelah order live terisi: geser plan
+        aktif ke harga fill sebenarnya (market order bisa slippage dari
+        harga plan). Seluruh level digeser sebesar delta sehingga jarak
+        risk/target (geometri R) dipertahankan — partial 0.5R, trailing,
+        dan status STOP/TP dihitung dari entry yang benar-benar terjadi.
+        Idempoten & aman dipanggil dari worker thread (assignment float
+        atomik di bawah GIL; loop engine membaca nilai konsisten tick
+        berikutnya)."""
+        plan = self.active_plan
+        if self.phase != "ACTIVE" or plan is None or fill_price <= 0:
+            return
+        delta = float(fill_price) - float(plan["entry"])
+        if delta == 0.0:
+            return
+        for k in ("entry", "entry_lo", "entry_hi", "stop", "tp1", "tp2",
+                  "initial_stop", "best"):
+            if k in plan:
+                plan[k] = float(plan[k]) + delta
+        logger.info("[%s] plan di-rebase ke fill %s (slippage %+.6g)",
+                    self.symbol, fill_price, delta)
+
     # ── Tracking setup aktif ──────────────────────────────────────────
 
     def _track_active(self, price, score, smooth_side, now,

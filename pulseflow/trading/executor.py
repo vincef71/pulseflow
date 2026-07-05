@@ -323,8 +323,6 @@ class TradeExecutor:
         side = SIDE_BUY if is_long else SIDE_SELL
         exit_side = SIDE_SELL if is_long else SIDE_BUY
         qty_s = _fmt(p["quantity"], p["step"]) if p["step"] else str(p["quantity"])
-        sl_s = _fmt(_round_step(p["stop"], p["tick"]), p["tick"]) if p["tick"] else str(p["stop"])
-        tp_s = _fmt(_round_step(p["tp1"], p["tick"]), p["tick"]) if p["tick"] else str(p["tp1"])
         results: Dict[str, Any] = {"ok": False, "mode": "LIVE"}
 
         try:
@@ -336,6 +334,41 @@ class TradeExecutor:
         results["entry_order"] = c.futures_create_order(
             symbol=bsymbol, side=side,
             type=FUTURE_ORDER_TYPE_MARKET, quantity=qty_s)
+
+        # 1b. Harga fill AKTUAL — market order bisa fill jauh dari harga plan
+        #     (slippage). avgPrice kadang 0 di response awal → re-fetch.
+        fill = 0.0
+        try:
+            fill = float(results["entry_order"].get("avgPrice") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        if fill <= 0:
+            for _ in range(3):
+                time.sleep(0.3)
+                try:
+                    od = c.futures_get_order(
+                        symbol=bsymbol,
+                        orderId=results["entry_order"]["orderId"])
+                    fill = float(od.get("avgPrice") or 0.0)
+                except Exception:
+                    fill = 0.0
+                if fill > 0:
+                    break
+        if fill <= 0:
+            fill = p["entry"]
+
+        # SL/TP digeser sebesar slippage — jarak risk & RR dari plan
+        # dipertahankan relatif terhadap harga fill sebenarnya.
+        slip = fill - p["entry"]
+        sl_price = p["stop"] + slip
+        tp_price = p["tp1"] + slip
+        sl_s = _fmt(_round_step(sl_price, p["tick"]), p["tick"]) if p["tick"] else str(sl_price)
+        tp_s = _fmt(_round_step(tp_price, p["tick"]), p["tick"]) if p["tick"] else str(tp_price)
+        results["fill_price"] = fill
+        results["slippage"] = slip
+        if abs(slip) > 0:
+            logger.info("Slippage %s: plan %s → fill %s (%+.4g) — SL/TP digeser",
+                        bsymbol, p["entry"], fill, slip)
 
         # 2. Stop loss — WAJIB; bila gagal, tutup posisi (fail-safe).
         #    Via Algo Order API (order kondisional tidak lagi diterima
@@ -374,20 +407,17 @@ class TradeExecutor:
         # untuk digabung dengan fill Binance oleh live_report.py.
         # PnL & harga exit TIDAK dicatat di sini: sumber kebenarannya API.
         entry_order = results["entry_order"]
-        try:
-            avg_fill = float(entry_order.get("avgPrice") or 0.0)
-        except (TypeError, ValueError):
-            avg_fill = 0.0
         rec = {
             "status": "LIVE_OPEN",
             "symbol": bsymbol,
             "side": p["side"],
             "quantity": p["quantity"],
             "entry_plan": p["entry"],
-            "entry_fill": avg_fill or p["entry"],
-            "stop": p["stop"],
-            "tp1": p["tp1"],
-            "tp2": p["tp2"],
+            "entry_fill": fill,
+            "slippage": round(slip, 8),
+            "stop": sl_price,          # sudah digeser sebesar slippage
+            "tp1": tp_price,
+            "tp2": p["tp2"] + slip,
             "risk_usdt": p["risk_usdt"],
             "notional_usdt": p["notional_usdt"],
             "leverage": p["leverage"],

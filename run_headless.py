@@ -104,9 +104,13 @@ class HeadlessTrader:
     eksekusi/tutup posisi via TradeExecutor. Berlaku untuk SEMUA symbol
     yang dilacak (dashboard hanya symbol fokus)."""
 
-    def __init__(self, executor: TradeExecutor, symbols, warmup_sec: float):
+    def __init__(self, executor: TradeExecutor, symbols, warmup_sec: float,
+                 rebase_cb=None):
         self.executor = executor
         self.symbols = list(symbols)
+        # rebase_cb(symbol, fill_price): geser plan engine ke harga fill
+        # exchange (slippage market order) — geometri R tetap konsisten.
+        self._rebase_cb = rebase_cb
         self.armed = True                      # entry baru diizinkan
         self.warmup_until = time.time() + warmup_sec
         self._busy = {s: False for s in self.symbols}
@@ -166,6 +170,13 @@ class HeadlessTrader:
                 if res.get("ok"):
                     self._consec_errors = 0
                     self.trades_opened += 1
+                    # Slippage: sinkronkan plan engine ke harga fill aktual
+                    fill = float(res.get("fill_price", 0.0) or 0.0)
+                    if fill > 0 and self._rebase_cb:
+                        try:
+                            self._rebase_cb(symbol, fill)
+                        except Exception as e:
+                            logger.warning("Rebase plan %s gagal: %s", symbol, e)
                     logger.info(
                         "✅ %s order: %s %s qty %s @ ~%s (SL %s · TP1 %s · "
                         "risk $%s · notional $%s)",
@@ -307,7 +318,9 @@ async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
 
 async def _amain(args, executor: TradeExecutor):
     engine = PulseEngine(mode=args.mode, symbols=args.symbols)
-    trader = HeadlessTrader(executor, args.symbols, args.warmup)
+    trader = HeadlessTrader(
+        executor, args.symbols, args.warmup,
+        rebase_cb=lambda sym, px: engine.entry_engines[sym].rebase_active_plan(px))
 
     engine.register_ui_callback(trader.on_tick)
     engine.register_feed_status_callback(
