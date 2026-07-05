@@ -98,10 +98,14 @@ class EntrySignalEngine:
     FIRE_SCORE         = 65.0    # skor minimum untuk ACTIVE
     FORMING_SCORE      = 45.0    # skor minimum untuk FORMING
     DROP_SCORE         = 42.0    # ACTIVE gugur bila skor < ini cukup lama
-    DROP_GRACE_SEC     = 3.0
+    # Anti-churn (analisa 89 trade live 4-5 Jul): median durasi 14 s, trade
+    # <15 s menyumbang −$19.55 dari net −$19.67 — fee 87% kerugian. Grace
+    # 3→8 s, hold 8→15 s, cooldown 20→90 s memutus loop entry→FADED→re-entry
+    # (siklus minimal ~31 s → ~105 s). STOP/TP2 tidak tersentuh — tetap instan.
+    DROP_GRACE_SEC     = 8.0
     SIDE_STABLE_TICKS  = 8       # arah harus stabil ~0.8 s sebelum fire
-    MIN_HOLD_SEC       = 8.0     # ACTIVE minimal hidup sekian detik
-    REFIRE_COOLDOWN    = 20.0    # jeda setelah setup berakhir sebelum fire lagi
+    MIN_HOLD_SEC       = 15.0    # ACTIVE minimal hidup sekian detik
+    REFIRE_COOLDOWN    = 90.0    # jeda setelah setup berakhir sebelum fire lagi
     MIN_RR             = 1.0     # plan valid hanya bila RR TP1 >= ini
     # Stop minimal % dari harga. Dinaikkan 0.05 → 0.5 (analisa paper 4 Jul):
     # stop 0.05% membuat notional ~2000× risk sehingga taker fee round-trip
