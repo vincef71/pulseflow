@@ -27,6 +27,22 @@ Pakai:
     python supervisor.py                     # report tiap 60 menit + alert
     python supervisor.py --interval 30       # report tiap 30 menit
     python supervisor.py --once              # satu report lalu keluar
+    python supervisor.py --manage            # + manajemen rule-based
+
+MODE MANAGE (opt-in, --manage) — menulis control.json tiap 5 menit
+berdasarkan aturan eksplisit; setiap tindakan dikirim ke Telegram:
+  R1  symbol berdarah   : PnL symbol hari ini ≤ −(pause-symbol-loss% ×
+      balance, default 1.5%) → tambah ke symbols_paused
+  R2  soft-stop harian  : PnL total hari ini ≤ −(soft-stop-loss% ×
+      balance, default 2.5%) → armed=false (lapisan SEBELUM hard-limit
+      runner di max_daily_loss_pct)
+  R3  chop kambuhan     : chop-cooldown engine terpicu ≥ chop-day-limit
+      kali (default 3) di satu symbol hari ini → pause symbol s.d. besok
+  Reset harian: ganti hari → manage me-revert HANYA perubahannya sendiri
+      (state di supervisor_state.json); pause/disarm manual-mu tak disentuh.
+
+Yang TIDAK PERNAH dilakukan manage: menaikkan risk/leverage/limit,
+me-re-arm yang kamu matikan manual, atau menempatkan order.
 """
 
 import argparse
@@ -91,6 +107,11 @@ ALERT_PATTERNS = [
     (re.compile(r"⚠ Tick rate ([\d.]+)/s < 80%"), "🐌 Engine keteteran: {0} tick/s", 1800),
 ]
 DEAD_AFTER_SEC = 300      # heartbeat berhenti sekian → runner dianggap mati
+
+MANAGE_INTERVAL_SEC = 300           # siklus evaluasi rule manage
+STATE_FILE = _ROOT / "supervisor_state.json"   # jejak perubahan milik manage
+_CHOP_LOG_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}) .*\[(\w+)\] \d+× FADED beruntun → entry di-pause")
 
 
 # ── Telegram ───────────────────────────────────────────────────────────
@@ -267,6 +288,150 @@ def build_report() -> str:
     return "\n".join(L)
 
 
+# ── Mode MANAGE: rule-based, menulis control.json ──────────────────────
+
+def pnl_today_by_symbol(ex):
+    """(total, {symbol: pnl_net}) hari ini. Paper: jurnal. Live: income
+    Binance per symbol (REALIZED_PNL + COMMISSION + FUNDING_FEE)."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    by = {}
+    if ex.paper_mode:
+        if PAPER_LOG.exists():
+            for t in json.loads(PAPER_LOG.read_text(encoding="utf-8")):
+                if t.get("status") == "PAPER_CLOSED" and \
+                        str(t.get("closed_at", "")).startswith(today):
+                    s = t.get("symbol", "?")
+                    by[s] = by.get(s, 0.0) + float(t.get("pnl_usdt", 0.0))
+    else:
+        midnight = datetime.combine(datetime.now().date(),
+                                    datetime.min.time())
+        batch = ex.client().futures_income_history(
+            startTime=int(midnight.timestamp() * 1000), limit=1000)
+        for it in batch:
+            if it.get("incomeType") in ("REALIZED_PNL", "COMMISSION",
+                                        "FUNDING_FEE"):
+                s = it.get("symbol") or "?"
+                by[s] = by.get(s, 0.0) + float(it.get("income", 0.0))
+    return sum(by.values()), by
+
+
+def chop_pauses_today() -> dict:
+    """{symbol: berapa kali chop-cooldown engine terpicu hari ini} dari
+    log runner."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    counts = {}
+    if not RUNNER_LOG.exists():
+        return counts
+    try:
+        for line in RUNNER_LOG.read_text(encoding="utf-8",
+                                         errors="replace").splitlines():
+            m = _CHOP_LOG_RE.match(line)
+            if m and m.group(1) == today:
+                counts[m.group(2)] = counts.get(m.group(2), 0) + 1
+    except Exception:
+        pass
+    return counts
+
+
+def _read_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"date": "", "paused_by_manage": {}, "soft_stopped": False}
+
+
+def _write_state(st: dict):
+    STATE_FILE.write_text(json.dumps(st, indent=2, ensure_ascii=False),
+                          encoding="utf-8")
+
+
+def manage_cycle(args):
+    """Satu evaluasi rule. Hanya menulis control.json bila ada perubahan;
+    hanya me-revert perubahan milik manage sendiri (supervisor_state.json)."""
+    from pulseflow.trading.executor import TradeExecutor
+
+    if not CONTROL_FILE.exists():
+        return
+    try:
+        ctl = json.loads(CONTROL_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("manage: control.json tidak terbaca (%s)", e)
+        return
+    st = _read_state()
+    today = datetime.now().strftime("%Y-%m-%d")
+    paused = {str(s).upper() for s in (ctl.get("symbols_paused") or [])}
+    actions = []
+
+    # Reset harian: revert HANYA perubahan milik manage
+    if st.get("date") != today:
+        for sym in list(st.get("paused_by_manage", {})):
+            if sym in paused:
+                paused.discard(sym)
+                actions.append(f"🌅 unpause {sym} (reset harian)")
+        if st.get("soft_stopped") and ctl.get("armed") is False:
+            ctl["armed"] = True
+            actions.append("🌅 armed=true (reset harian soft-stop)")
+        st = {"date": today, "paused_by_manage": {}, "soft_stopped": False}
+
+    ex = TradeExecutor()
+    try:
+        balance = ex.get_balance()["balance"]
+        total, by_sym = pnl_today_by_symbol(ex)
+    except Exception as e:
+        logger.warning("manage: gagal ambil PnL (%s) — siklus dilewati", e)
+        return
+
+    # R1 — symbol berdarah → pause
+    if balance > 0:
+        sym_limit = balance * args.pause_symbol_loss / 100.0
+        for sym, pnl in by_sym.items():
+            if pnl <= -sym_limit and sym not in paused:
+                paused.add(sym)
+                st["paused_by_manage"][sym] = f"PnL ${pnl:+.2f}"
+                actions.append(f"⏸ pause {sym} — PnL hari ini ${pnl:+.2f} "
+                               f"(≤ −{args.pause_symbol_loss:.1f}% balance)")
+
+    # R2 — soft-stop harian → armed=false (sebelum hard-limit runner)
+    if balance > 0 and ctl.get("armed", True) and \
+            total <= -balance * args.soft_stop_loss / 100.0:
+        ctl["armed"] = False
+        st["soft_stopped"] = True
+        actions.append(f"🛑 armed=false — PnL total hari ini ${total:+.2f} "
+                       f"(≤ −{args.soft_stop_loss:.1f}% balance). Entry stop "
+                       f"s.d. besok; posisi terbuka tetap dikelola runner")
+
+    # R3 — chop kambuhan → pause s.d. besok
+    for sym, n in chop_pauses_today().items():
+        if n >= args.chop_day_limit and sym not in paused:
+            paused.add(sym)
+            st["paused_by_manage"][sym] = f"chop {n}×"
+            actions.append(f"⏸ pause {sym} — chop-cooldown terpicu {n}× "
+                           f"hari ini (≥ {args.chop_day_limit})")
+
+    if not actions:
+        _write_state(st)
+        return
+    ctl["symbols_paused"] = sorted(paused)
+    ctl["note"] = f"[manage {datetime.now():%H:%M}] " + "; ".join(actions)
+    CONTROL_FILE.write_text(json.dumps(ctl, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+    _write_state(st)
+    msg = "🤖 MANAGE:\n" + "\n".join(actions)
+    logger.info(msg.replace("\n", " | "))
+    tg_send(msg)
+
+
+def manage_loop(stop_ev: threading.Event, args):
+    while not stop_ev.is_set():
+        try:
+            manage_cycle(args)
+        except Exception as e:
+            logger.error("manage cycle error: %s", e)
+        stop_ev.wait(MANAGE_INTERVAL_SEC)
+
+
 # ── Alert: tail log runner ─────────────────────────────────────────────
 
 def alert_loop(stop_ev: threading.Event):
@@ -332,6 +497,18 @@ def main():
                     help="matikan alert instan, report berkala saja")
     ap.add_argument("--get-chat-id", action="store_true",
                     help="bantu cari TELEGRAM_CHAT_ID (kirim pesan ke bot dulu)")
+    ap.add_argument("--manage", action="store_true",
+                    help="aktifkan manajemen rule-based (menulis control.json "
+                         "tiap 5 menit — lihat docstring untuk aturannya)")
+    ap.add_argument("--pause-symbol-loss", type=float, default=1.5,
+                    metavar="PCT", help="R1: pause symbol bila PnL symbol "
+                    "hari ini ≤ −PCT%% balance (default: 1.5)")
+    ap.add_argument("--soft-stop-loss", type=float, default=2.5,
+                    metavar="PCT", help="R2: armed=false bila PnL total hari "
+                    "ini ≤ −PCT%% balance (default: 2.5)")
+    ap.add_argument("--chop-day-limit", type=int, default=3, metavar="N",
+                    help="R3: pause symbol s.d. besok bila chop-cooldown "
+                    "terpicu ≥ N kali hari ini (default: 3)")
     args = ap.parse_args()
 
     if args.get_chat_id:
@@ -351,6 +528,13 @@ def main():
         threading.Thread(target=alert_loop, args=(stop_ev,), daemon=True,
                          name="alert-tail").start()
         logger.info("Alert tail aktif: %s", RUNNER_LOG.name)
+    if args.manage:
+        threading.Thread(target=manage_loop, args=(stop_ev, args),
+                         daemon=True, name="manage").start()
+        logger.info("MANAGE aktif: R1 pause symbol ≤ −%.1f%% · R2 soft-stop "
+                    "≤ −%.1f%% · R3 chop ≥ %d×/hari (siklus %d s)",
+                    args.pause_symbol_loss, args.soft_stop_loss,
+                    args.chop_day_limit, MANAGE_INTERVAL_SEC)
 
     logger.info("Supervisor berjalan — report tiap %.0f menit. Ctrl+C untuk "
                 "berhenti.", args.interval)
