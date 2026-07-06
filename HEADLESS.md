@@ -108,7 +108,35 @@ loss / max trade → status `🚧 DAILY-LIMIT`, entry baru diblokir sampai
 ganti hari (exit posisi terbuka tetap dikelola). Heartbeat menampilkan
 status + pemakaian kuota harian (`hari ini 3/20`).
 
-## 5. Service permanen (systemd)
+## 5. Supervisor — report & alert Telegram
+
+`supervisor.py` berjalan berdampingan dengan runner (proses kedua) dan
+read-only terhadap trading:
+
+- **Report berkala** (default 60 menit): balance + PnL hari ini, posisi
+  terbuka, statistik trade per alasan exit, status runner (heartbeat +
+  tick rate), bias 4H per symbol, isi control.json.
+- **Alert instan** (tail log runner): order live terisi/exit/partial,
+  DISARMED, DAILY-LIMIT, fail-safe KRITIS, feed macet, engine keteteran,
+  dan **runner mati** (heartbeat berhenti > 5 menit → 💀 alert; pulih →
+  ✅ alert).
+
+Setup: buat bot via @BotFather → isi `TELEGRAM_BOT_TOKEN` di `.env` →
+kirim pesan apa pun ke bot → `python supervisor.py --get-chat-id` → isi
+`TELEGRAM_CHAT_ID`. Tes: `python supervisor.py --once` (tanpa token =
+dry-run ke console).
+
+```bash
+python supervisor.py                  # report tiap 60 menit + alert instan
+python supervisor.py --interval 30    # report tiap 30 menit
+python supervisor.py --no-alerts      # report saja
+```
+
+Unit systemd kedua (`/etc/systemd/system/pulseflow-supervisor.service`):
+sama seperti unit runner, ganti `ExecStart` menjadi
+`.venv/bin/python supervisor.py --interval 60`.
+
+## 6. Service permanen (systemd)
 
 `/etc/systemd/system/pulseflow.service`:
 

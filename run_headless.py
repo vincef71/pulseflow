@@ -426,6 +426,12 @@ class ControlFile:
         except (TypeError, ValueError):
             logger.warning("control.json: batas harian tidak valid — "
                            "nilai lama dipertahankan")
+        # Blok harian dievaluasi ulang terhadap batas baru pada fire
+        # berikutnya — reload control = kesempatan unblock yang disengaja
+        if t._daily_block:
+            t._daily_block = False
+            logger.info("⚙ CONTROL: daily-limit di-reset — dievaluasi ulang "
+                        "dengan batas baru di sinyal berikutnya")
 
         note = str(cfg.get("note") or "")
         logger.info(
