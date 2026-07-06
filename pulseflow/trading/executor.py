@@ -440,7 +440,8 @@ class TradeExecutor:
     def partial_close(self, symbol: str, exit_price: float, new_stop: float,
                       fraction: float = 0.5) -> Dict[str, Any]:
         """Event PARTIAL entry engine (profit ≥ 0.5R): tutup `fraction`
-        posisi + pindahkan SL ke breakeven (`new_stop` = harga entry).
+        posisi + pindahkan SL mendekati breakeven (`new_stop` = entry −
+        buffer ruang napas dari engine).
 
         Live: reduceOnly market → cancel semua algo order (SL awal + TP1,
         TP1 closePosition konflik dengan trailing) → pasang STOP_MARKET

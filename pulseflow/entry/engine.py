@@ -126,6 +126,12 @@ class EntrySignalEngine:
     # Setelah BE: FADED diabaikan (exit via trail/TP2/FLIP), status RUNNER.
     PARTIAL_AT_R       = 0.5     # trigger partial di 0.5× risk awal
     TRAIL_ATR_MULT     = 2.0     # trailing stop = best ± 2×s_atr
+    # Ruang napas stop pasca-partial (7 Jul, data TRAIL avg −0.03R: stop
+    # persis di entry tersapu wick retrace normal). Stop = entry − buffer;
+    # buffer = min(0.5×ATR-1m, 0.4×risk) — worst case sisa posisi −0.4R,
+    # masih ≈ impas net karena partial +0.5R×50% sudah terkunci.
+    BE_BUFFER_ATR      = 0.5
+    BE_BUFFER_MAX_R    = 0.4
 
     WHALE_BUCKET_SEC   = 5.0     # sampling whale_delta_usd_5s → bucket
     WHALE_BUCKETS      = 12      # 12 × 5 s = jendela 60 detik
@@ -672,7 +678,11 @@ class EntrySignalEngine:
         if (not be_moved and risk > 0
                 and (plan["best"] - plan["entry"]) * sgn >= risk * self.PARTIAL_AT_R):
             plan["be_moved"] = True
-            plan["stop"] = float(plan["entry"])   # SL → breakeven
+            # SL → dekat breakeven, dengan ruang napas di bawah entry —
+            # stop persis di entry tersapu retrace wick normal.
+            buffer = min(self.BE_BUFFER_ATR * s_atr if s_atr > 0 else 0.0,
+                         self.BE_BUFFER_MAX_R * risk)
+            plan["stop"] = float(plan["entry"] - sgn * buffer)
             self._drop_since = 0.0
             return "PARTIAL", False
 

@@ -246,7 +246,7 @@ class HeadlessTrader:
     def _on_partial(self, symbol: str, entry: dict):
         plan = entry.get("plan") or {}
         price = float(entry.get("price", 0.0))
-        be_stop = float(plan.get("stop", 0.0))   # engine sudah set = entry
+        be_stop = float(plan.get("stop", 0.0))   # engine: entry − buffer napas
         if price <= 0 or be_stop <= 0:
             return
         if not self.executor.paper_mode and not self.executor.is_tracked_live(symbol):
