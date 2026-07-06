@@ -99,6 +99,8 @@ tanpa restart. File ini juga pintu masuk **sesi supervisi terjadwal**
   "symbols_paused": ["LABUSDT"],  // pause entry symbol tertentu
   "max_daily_loss_pct": 3.0,  // loss hari ini ≥ 3% balance → blok entry s.d. besok
   "max_trades_per_day": 20,   // batas jumlah entry per hari
+  "max_slippage_pct": 0.15,   // avg slippage symbol (% harga, ≥3 trade live
+                              // terakhir) > ini → sinyal dilewati (0 = mati)
   "note": "chop siang — short only"   // catatan bebas, masuk log
 }
 ```

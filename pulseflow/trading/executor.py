@@ -650,6 +650,28 @@ class TradeExecutor:
             logger.info("PAPER close %s: %d posisi (%s)", bsymbol, n, reason)
         return n
 
+    def avg_slippage_pct(self, symbol: str, n: int = 20) -> float:
+        """Rata-rata |slippage| entry (% dari harga) pada n trade live
+        terakhir symbol ini, dari live_trades.json. Minimal 3 sampel —
+        di bawah itu return 0 (belum cukup bukti untuk memblokir).
+        Dipakai guard: coin ilikuid (mis. VANRY 0.35%/sisi ≈ 0.4R) membayar
+        'pajak' slippage yang tidak bisa dikalahkan strategi."""
+        bsymbol = self.to_binance_symbol(symbol)
+        vals = []
+        for t in self._read_live_log():
+            if t.get("symbol") != bsymbol:
+                continue
+            try:
+                ep = float(t.get("entry_plan", 0.0))
+                if ep > 0:
+                    vals.append(abs(float(t.get("slippage", 0.0))) / ep * 100.0)
+            except (TypeError, ValueError):
+                continue
+        vals = vals[-n:]
+        if len(vals) < 3:
+            return 0.0
+        return sum(vals) / len(vals)
+
     def realized_pnl_today(self) -> float:
         """PnL terealisasi sejak 00:00 waktu lokal — untuk guard max loss
         harian. Paper: dari paper_trades.json. Live: income Binance

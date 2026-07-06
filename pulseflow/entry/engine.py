@@ -692,8 +692,11 @@ class EntrySignalEngine:
             if (trail - plan["stop"]) * sgn > 0:
                 plan["stop"] = float(trail)
 
-        # Arah flip keras — tetap menutup (pembalikan nyata, pre/pasca BE)
-        if smooth_side != plan["side"] and score >= 40.0 and held >= self.MIN_HOLD_SEC:
+        # Arah flip keras — hanya pre-BE (deteksi pembalikan dini setup
+        # gagal). Pasca-BE trail yang memutuskan exit: data 6 Jul, 7 runner
+        # ber-partial terpotong FLIP di pullback padahal TP2 avg +3.05R.
+        if (not be_moved and smooth_side != plan["side"]
+                and score >= 40.0 and held >= self.MIN_HOLD_SEC):
             return "FLIP", True
 
         # Skor layu terlalu lama — hanya pre-BE (setup gagal, cut cepat).

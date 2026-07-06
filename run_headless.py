@@ -124,6 +124,8 @@ class HeadlessTrader:
         self.symbols_paused: set = set()
         self.max_daily_loss_pct = 3.0          # loss hari ini ≥ % balance → blok
         self.max_trades_per_day = 20
+        self.max_slippage_pct = 0.15           # avg slippage symbol > ini → skip
+                                               # sinyal (0 = guard mati)
         self.daily_trades = 0
         self._daily_date = time.strftime("%Y-%m-%d")
         self._daily_block = False
@@ -195,6 +197,17 @@ class HeadlessTrader:
                 if self.executor.has_open_position(symbol):
                     logger.info("⏭ Posisi %s masih terbuka — sinyal dilewati", symbol)
                     return
+                # Guard slippage: coin ilikuid membayar 'pajak' per trade
+                # yang tak terkalahkan (VANRY 6 Jul: 0.35%/sisi ≈ 0.8R
+                # bolak-balik). Live only — paper tidak punya slippage.
+                if self.max_slippage_pct > 0 and not self.executor.paper_mode:
+                    sp = self.executor.avg_slippage_pct(symbol)
+                    if sp > self.max_slippage_pct:
+                        logger.warning(
+                            "⏭ %s slippage rata-rata %.3f%% > %.2f%% — "
+                            "sinyal dilewati (coin terlalu tipis untuk "
+                            "market order)", symbol, sp, self.max_slippage_pct)
+                        return
                 # Guard max loss harian — dicek di worker (network call live)
                 if self.max_daily_loss_pct > 0:
                     pnl_today = self.executor.realized_pnl_today()
@@ -352,6 +365,8 @@ class ControlFile:
         symbols_paused     entry symbol tertentu di-pause, mis. ["LABUSDT"]
         max_daily_loss_pct loss hari ini ≥ % balance → blok entry s.d. besok
         max_trades_per_day jumlah entry maksimum per hari
+        max_slippage_pct   avg slippage symbol (%harga) > ini → skip sinyal
+                           (live only; 0 = mati; default 0.15)
         note               catatan bebas — kenapa disetel begini (masuk log)
     """
 
@@ -377,6 +392,7 @@ class ControlFile:
             "symbols_paused": [],
             "max_daily_loss_pct": 3.0,
             "max_trades_per_day": 20,
+            "max_slippage_pct": 0.15,
             "note": "dibuat otomatis oleh run_headless — edit kapan saja, "
                     "reload otomatis tanpa restart",
         }
@@ -423,6 +439,7 @@ class ControlFile:
         try:
             t.max_daily_loss_pct = float(cfg.get("max_daily_loss_pct", 3.0))
             t.max_trades_per_day = int(cfg.get("max_trades_per_day", 20))
+            t.max_slippage_pct = float(cfg.get("max_slippage_pct", 0.15))
         except (TypeError, ValueError):
             logger.warning("control.json: batas harian tidak valid — "
                            "nilai lama dipertahankan")
@@ -436,10 +453,10 @@ class ControlFile:
         note = str(cfg.get("note") or "")
         logger.info(
             "⚙ CONTROL reload: armed=%s · arah=%s · risk %.2f%% · pause=%s · "
-            "max loss %.1f%%/hari · max %d trade/hari%s",
+            "max loss %.1f%%/hari · max %d trade/hari · max slip %.2f%%%s",
             t.control_armed, dval, self.executor.risk_pct,
             sorted(t.symbols_paused) or "-",
-            t.max_daily_loss_pct, t.max_trades_per_day,
+            t.max_daily_loss_pct, t.max_trades_per_day, t.max_slippage_pct,
             f" · note: {note}" if note else "")
 
     async def watch(self, interval: float = 5.0):
