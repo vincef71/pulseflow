@@ -112,6 +112,13 @@ class EntrySignalEngine:
     # (~0.1% notional) = 2R — mustahil profit. Di 0.5%, fee ≈ 0.2R.
     MIN_RISK_PCT       = 0.5
 
+    # Adaptive symbol cooldown (analisa live 6 Jul: 13 trade/jam di HYPE
+    # range 0.5%, 10 FADED beruntun ~−0.2R — REFIRE_COOLDOWN 90 s tidak
+    # cukup karena chop bertahan berjam-jam). FADED beruntun = fire terus
+    # menyala lalu layu → pause entry symbol ini sementara.
+    CHOP_FADED_LIMIT   = 3       # FADED beruntun sebanyak ini → pause
+    CHOP_PAUSE_SEC     = 900.0   # lama pause (15 menit)
+
     # Manajemen posisi (analisa live 5 Jul: 24/47 FADED ditutup saat gross
     # profit; TP2 100% win; posisi >5m dibiarkan ke SL penuh = −$6.64).
     # Profit ≥ 0.5R → event PARTIAL (executor tutup 50% + SL exchange ke BE),
@@ -153,6 +160,10 @@ class EntrySignalEngine:
         self._drop_since = 0.0
         self._ended_at = 0.0
 
+        # Adaptive symbol cooldown (deteksi chop via FADED beruntun)
+        self._faded_streak = 0
+        self.chop_pause_until = 0.0
+
         # Instrumentasi (pass-rate per check, untuk kalibrasi ambang)
         self._diag_n = 0
         self._diag_sided = 0
@@ -173,6 +184,8 @@ class EntrySignalEngine:
         self.active_since = 0.0
         self._drop_since = 0.0
         self._ended_at = 0.0
+        self._faded_streak = 0
+        self.chop_pause_until = 0.0
 
     # ── Entry point ───────────────────────────────────────────────────
 
@@ -268,15 +281,22 @@ class EntrySignalEngine:
                 self.active_plan = None
                 self.active_side = None
                 self._ended_at = now
+                self._register_setup_end(status, now)
         if self.phase != "ACTIVE":
             in_cooldown = (now - self._ended_at) < self.REFIRE_COOLDOWN
             dir_ok = self._dir_allowed(smooth_side, metrics.get("bias_4h"))
             if not dir_ok and score >= self.FORMING_SCORE:
                 warnings.append(
                     f"Arah {smooth_side} ditahan (filter {self.direction_filter})")
+            chop_left = self.chop_pause_until - now
+            if chop_left > 0 and score >= self.FORMING_SCORE:
+                warnings.append(
+                    f"Chop cooldown {chop_left:.0f}s — {self.CHOP_FADED_LIMIT}× "
+                    f"FADED beruntun")
             if (score >= self.FIRE_SCORE and side == smooth_side
                     and self._side_ticks >= self.SIDE_STABLE_TICKS
                     and dir_ok
+                    and chop_left <= 0
                     and not in_cooldown):
                 plan = self._build_plan(smooth_side, price, s_atr, liquidity, macro, context)
                 if plan is not None and plan["rr1"] >= self.MIN_RR:
@@ -549,6 +569,25 @@ class EntrySignalEngine:
             "best": float(entry_mid),      # maximum favorable excursion
             "be_moved": False,             # sudah partial + SL ke breakeven?
         }
+
+    # ── Adaptive symbol cooldown ──────────────────────────────────────
+
+    def _register_setup_end(self, status: str, now: float):
+        """FADED beruntun = ciri pasar chop (fire menyala lalu layu
+        berulang). Setelah CHOP_FADED_LIMIT kali beruntun → pause entry
+        symbol ini CHOP_PAUSE_SEC. STOP/TP2/TRAIL me-reset streak (harga
+        benar-benar bergerak — bukan chop); FLIP netral karena di chop
+        FADED dan FLIP berselang-seling."""
+        if status == "FADED":
+            self._faded_streak += 1
+            if self._faded_streak >= self.CHOP_FADED_LIMIT:
+                self.chop_pause_until = now + self.CHOP_PAUSE_SEC
+                self._faded_streak = 0
+                logger.info("[%s] %d× FADED beruntun → entry di-pause %.0f "
+                            "menit (chop)", self.symbol,
+                            self.CHOP_FADED_LIMIT, self.CHOP_PAUSE_SEC / 60.0)
+        elif status in ("STOP", "TP2", "TRAIL"):
+            self._faded_streak = 0
 
     # ── Filter arah entry ─────────────────────────────────────────────
 

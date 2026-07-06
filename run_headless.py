@@ -481,9 +481,11 @@ async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
                 b4s = {"UP": "▲", "DOWN": "▼"}.get(b4["trend"], "─") + f"{b4['bias']:+.2f}"
             else:
                 b4s = "?"
+            chop_left = engine.entry_engines[sym].chop_pause_until - now
+            chop_s = f" ⏸chop {chop_left / 60:.0f}m" if chop_left > 0 else ""
             parts.append(f"{sym} {price:,.6g} [{ent.get('phase', '?')} "
                          f"{side} {ent.get('score', 0)}] 4h {b4s} "
-                         f"wh ${wthr / 1000:,.3g}K{wmark}")
+                         f"wh ${wthr / 1000:,.3g}K{wmark}{chop_s}")
             if count > 0 and last_t > 0 and now - last_t > 120:
                 logger.warning("⚠ Feed %s tidak menerima trade %.0f s — "
                                "cek koneksi", sym, now - last_t)

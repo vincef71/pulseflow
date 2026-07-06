@@ -83,6 +83,8 @@ ALERT_PATTERNS = [
     (re.compile(r"AUTO-ENTRY DINONAKTIFKAN — (.+)"), "🛑 DISARMED: {0}", 600),
     (re.compile(r"🚧 DAILY-LIMIT: (.+)"), "🚧 DAILY-LIMIT: {0}", 600),
     (re.compile(r"KRITIS: (.+)"), "‼️ KRITIS: {0} — CEK POSISI SEKARANG", 60),
+    (re.compile(r"\[(\w+)\] (\d+)× FADED beruntun → entry di-pause (\d+) menit"),
+     "⏸ {0}: chop terdeteksi ({1}× FADED beruntun) — entry pause {2} menit", 0),
     (re.compile(r"⚠ Feed (\S+) tidak menerima trade ([\d.]+) s"),
      "⚠ Feed {0} macet {1}s", 900),
     (re.compile(r"UNCAUGHT EXCEPTION"), "💥 Uncaught exception di runner — cek log", 600),
