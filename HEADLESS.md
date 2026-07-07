@@ -62,7 +62,7 @@ Opsi:
 | `--mode` | `binance` | sumber feed data (`binance`/`hyperliquid`); eksekusi selalu Binance Futures |
 | `--paper` | — | paksa paper mode, abaikan `.env` |
 | `--live` | — | konfirmasi eksplisit mode LIVE (pengganti dialog GUI) |
-| `--direction` | `both` | filter arah entry: `long`/`short` only, atau `auto` = hanya searah bias trend 4H (EMA20/50 klines 4h, refresh 5 menit) |
+| `--direction` | `both` | filter arah entry: `long`/`short` only, `auto` = hanya searah bias trend 4H (EMA20/50 klines 4h, refresh 5 menit), `auto_strict` = searah 4H **dan** bias 1m (entry hanya saat pullback selesai/resumption) |
 | `--risk` | `RISK_PCT` .env | override risk % per trade |
 | `--warmup` | `90` | detik awal tanpa eksekusi (konteks klines seeding) |
 | `--heartbeat` | `60` | interval log status berkala |

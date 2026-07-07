@@ -472,7 +472,8 @@ class ControlFile:
         t.control_armed = bool(cfg.get("armed", True))
 
         d = str(cfg.get("direction") or "both").lower()
-        dval = d.upper() if d in ("long", "short", "auto") else "BOTH"
+        dval = d.upper() if d in ("long", "short", "auto",
+                                  "auto_strict") else "BOTH"
         for eng in self.engine.entry_engines.values():
             eng.direction_filter = dval
 
@@ -637,10 +638,12 @@ def _parse_args():
                         "PAPER_MODE=false di .env)")
     p.add_argument("--paper", action="store_true",
                    help="paksa paper mode, abaikan PAPER_MODE di .env")
-    p.add_argument("--direction", choices=["both", "long", "short", "auto"],
+    p.add_argument("--direction",
+                   choices=["both", "long", "short", "auto", "auto_strict"],
                    default="both",
-                   help="filter arah entry: long/short only, atau auto = "
-                        "hanya searah bias trend 4H (default: both)")
+                   help="filter arah entry: long/short only, auto = searah "
+                        "bias 4H, auto_strict = searah 4H DAN bias 1m "
+                        "(tunggu resumption pullback) (default: both)")
     p.add_argument("--risk", type=float, default=None, metavar="PCT",
                    help="override risk %% per trade (default: RISK_PCT .env)")
     p.add_argument("--warmup", type=float, default=90.0, metavar="SEC",

@@ -48,7 +48,8 @@ class EntrySignalCard(QFrame):
     direction_changed = pyqtSignal(str)
 
     _DIR_OPTIONS = [("SEMUA", "BOTH"), ("LONG only", "LONG"),
-                    ("SHORT only", "SHORT"), ("AUTO (bias 4H)", "AUTO")]
+                    ("SHORT only", "SHORT"), ("AUTO (bias 4H)", "AUTO"),
+                    ("AUTO ketat (4H+1m)", "AUTO_STRICT")]
 
     def __init__(self, parent=None):
         super().__init__(parent)

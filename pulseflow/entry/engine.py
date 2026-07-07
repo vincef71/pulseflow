@@ -290,7 +290,8 @@ class EntrySignalEngine:
                 self._register_setup_end(status, now)
         if self.phase != "ACTIVE":
             in_cooldown = (now - self._ended_at) < self.REFIRE_COOLDOWN
-            dir_ok = self._dir_allowed(smooth_side, metrics.get("bias_4h"))
+            dir_ok = self._dir_allowed(smooth_side, metrics.get("bias_4h"),
+                                       context)
             if not dir_ok and score >= self.FORMING_SCORE:
                 warnings.append(
                     f"Arah {smooth_side} ditahan (filter {self.direction_filter})")
@@ -597,9 +598,13 @@ class EntrySignalEngine:
 
     # ── Filter arah entry ─────────────────────────────────────────────
 
-    def _dir_allowed(self, side: Optional[str], bias_4h=None) -> bool:
+    def _dir_allowed(self, side: Optional[str], bias_4h=None,
+                     context=None) -> bool:
         """Apakah fire ke arah `side` diizinkan oleh direction_filter.
-        AUTO: hanya searah trend bias 4H; 4H FLAT/belum siap = bebas."""
+        AUTO: hanya searah trend bias 4H; 4H FLAT/belum siap = bebas.
+        AUTO_STRICT: syarat AUTO + bias 1m (konteks) juga harus searah —
+        praktis menunggu pullback SELESAI (resumption) alih-alih entry di
+        tengah pullback; konteks belum siap = jatuh ke perilaku AUTO."""
         if side not in ("LONG", "SHORT"):
             return True
         f = self.direction_filter
@@ -607,12 +612,18 @@ class EntrySignalEngine:
             return side == "LONG"
         if f == "SHORT":
             return side == "SHORT"
-        if f == "AUTO":
+        if f in ("AUTO", "AUTO_STRICT"):
             b = bias_4h or {}
-            trend = b.get("trend", "FLAT")
-            if not b.get("ready") or trend == "FLAT":
-                return True
-            return (trend == "UP") == (side == "LONG")
+            trend4 = b.get("trend", "FLAT")
+            if b.get("ready") and trend4 != "FLAT" \
+                    and (trend4 == "UP") != (side == "LONG"):
+                return False
+            if f == "AUTO_STRICT":
+                c = context or {}
+                if c.get("ready"):
+                    return c.get("trend", "FLAT") == \
+                        ("UP" if side == "LONG" else "DOWN")
+            return True
         return True
 
     # ── Rebase plan ke harga fill exchange ────────────────────────────
