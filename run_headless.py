@@ -102,6 +102,41 @@ MAX_CONSEC_EXEC_ERRORS = 3
 CONTROL_FILE = Path(__file__).resolve().parent / "control.json"
 
 
+def parse_trading_hours(spec: str):
+    """'07-11,19-23' atau '07:30-11:00' (jam LOKAL) → [(mulai, akhir)] dalam
+    jam desimal. Rentang menyeberang tengah malam ('22-02') didukung.
+    String kosong = trading 24 jam. Format salah → ValueError."""
+    ranges = []
+    for part in str(spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        a, b = part.split("-")
+        def to_h(s):
+            s = s.strip()
+            if ":" in s:
+                h, m = s.split(":")
+                return int(h) % 24 + int(m) / 60.0
+            return int(s) % 24
+        ranges.append((to_h(a), to_h(b)))
+    return ranges
+
+
+def in_trading_hours(ranges, now: float) -> bool:
+    """True bila `now` berada di salah satu rentang (kosong = selalu)."""
+    if not ranges:
+        return True
+    lt = time.localtime(now)
+    h = lt.tm_hour + lt.tm_min / 60.0
+    for a, b in ranges:
+        if a <= b:
+            if a <= h < b:
+                return True
+        elif h >= a or h < b:      # menyeberang tengah malam
+            return True
+    return False
+
+
 class HeadlessTrader:
     """Pengganti logika auto-trade dashboard: konsumsi tick engine dan
     eksekusi/tutup posisi via TradeExecutor. Berlaku untuk SEMUA symbol
@@ -126,6 +161,11 @@ class HeadlessTrader:
         self.max_trades_per_day = 20
         self.max_slippage_pct = 0.15           # avg slippage symbol > ini → skip
                                                # sinyal (0 = guard mati)
+        self.trading_hours = []                # [(mulai,akhir)] jam lokal;
+                                               # kosong = 24 jam. Hanya menahan
+                                               # ENTRY — posisi terbuka tetap
+                                               # dikelola di luar jam.
+        self.trading_hours_spec = ""
         self.daily_trades = 0
         self._daily_date = time.strftime("%Y-%m-%d")
         self._daily_block = False
@@ -168,6 +208,10 @@ class HeadlessTrader:
             return
         if not self.control_armed:
             logger.info("⏸ CONTROL OFF: sinyal dilewati — %s", desc)
+            return
+        if not in_trading_hours(self.trading_hours, time.time()):
+            logger.info("⏰ Di luar trading hours (%s): sinyal dilewati — %s",
+                        self.trading_hours_spec, desc)
             return
         if symbol in self.symbols_paused:
             logger.info("⏸ %s di-pause via control — sinyal dilewati", symbol)
@@ -331,6 +375,8 @@ class HeadlessTrader:
             return "🛑 DISARMED"
         if not self.control_armed:
             return "⏸ OFF (control)"
+        if not in_trading_hours(self.trading_hours, now):
+            return f"⏰ OFF-HOURS (aktif {self.trading_hours_spec})"
         self._roll_day()
         if self._daily_block:
             return "🚧 DAILY-LIMIT"
@@ -367,6 +413,10 @@ class ControlFile:
         max_trades_per_day jumlah entry maksimum per hari
         max_slippage_pct   avg slippage symbol (%harga) > ini → skip sinyal
                            (live only; 0 = mati; default 0.15)
+        trading_hours      jendela ENTRY jam lokal, mis. "07-11,19-23" atau
+                           "07:30-11:00"; menyeberang tengah malam boleh
+                           ("22-02"); kosong = 24 jam. Posisi terbuka tetap
+                           dikelola di luar jam (exit tidak diblokir).
         note               catatan bebas — kenapa disetel begini (masuk log)
     """
 
@@ -393,6 +443,7 @@ class ControlFile:
             "max_daily_loss_pct": 3.0,
             "max_trades_per_day": 20,
             "max_slippage_pct": 0.15,
+            "trading_hours": "",
             "note": "dibuat otomatis oleh run_headless — edit kapan saja, "
                     "reload otomatis tanpa restart",
         }
@@ -443,6 +494,15 @@ class ControlFile:
         except (TypeError, ValueError):
             logger.warning("control.json: batas harian tidak valid — "
                            "nilai lama dipertahankan")
+
+        spec = str(cfg.get("trading_hours") or "")
+        try:
+            t.trading_hours = parse_trading_hours(spec)
+            t.trading_hours_spec = spec
+        except (ValueError, TypeError):
+            logger.warning("control.json: trading_hours %r tidak valid "
+                           "(format: \"07-11,19-23\") — nilai lama dipertahankan",
+                           spec)
         # Blok harian dievaluasi ulang terhadap batas baru pada fire
         # berikutnya — reload control = kesempatan unblock yang disengaja
         if t._daily_block:
@@ -453,10 +513,12 @@ class ControlFile:
         note = str(cfg.get("note") or "")
         logger.info(
             "⚙ CONTROL reload: armed=%s · arah=%s · risk %.2f%% · pause=%s · "
-            "max loss %.1f%%/hari · max %d trade/hari · max slip %.2f%%%s",
+            "max loss %.1f%%/hari · max %d trade/hari · max slip %.2f%% · "
+            "jam %s%s",
             t.control_armed, dval, self.executor.risk_pct,
             sorted(t.symbols_paused) or "-",
             t.max_daily_loss_pct, t.max_trades_per_day, t.max_slippage_pct,
+            t.trading_hours_spec or "24j",
             f" · note: {note}" if note else "")
 
     async def watch(self, interval: float = 5.0):

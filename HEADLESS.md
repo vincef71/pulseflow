@@ -101,6 +101,9 @@ tanpa restart. File ini juga pintu masuk **sesi supervisi terjadwal**
   "max_trades_per_day": 20,   // batas jumlah entry per hari
   "max_slippage_pct": 0.15,   // avg slippage symbol (% harga, ≥3 trade live
                               // terakhir) > ini → sinyal dilewati (0 = mati)
+  "trading_hours": "07-11,19-23",  // jendela ENTRY (jam lokal); "" = 24 jam;
+                              // "22-02" (lewat tengah malam) & "07:30-11:00"
+                              // didukung. Posisi terbuka tetap dikelola.
   "note": "chop siang — short only"   // catatan bebas, masuk log
 }
 ```
