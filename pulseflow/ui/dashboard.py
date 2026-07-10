@@ -372,6 +372,7 @@ class PulseDashboard(QMainWindow):
         self.entry_card.set_exec_mode("PAPER" if self.executor.paper_mode else "LIVE")
         self.entry_card.execute_requested.connect(self._on_execute_requested)
         self.entry_card.direction_changed.connect(self._on_direction_changed)
+        self.entry_card.htf_interval_changed.connect(self._on_htf_interval_changed)
         self.entry_card.auto_toggle_requested.connect(self._on_auto_toggle)
         self.exec_summary_ready.connect(self._on_exec_summary)
         self.exec_done.connect(self._on_exec_done)
@@ -428,7 +429,10 @@ class PulseDashboard(QMainWindow):
     def _start_backend(self):
         # Create and start core engine in a dedicated background asyncio thread
         self.engine = PulseEngine(mode=self.engine_mode, symbols=self.symbols)
-        
+
+        # Sinkronkan combo timeframe HTF ke interval engine (engine baru ada di sini)
+        self.entry_card.set_htf_interval(self.engine.htf_interval)
+
         # Register engine callbacks
         self.engine.register_ui_callback(self._engine_ui_callback)
         self.engine.register_signal_callback(self._engine_signal_callback)
@@ -650,6 +654,13 @@ class PulseDashboard(QMainWindow):
         for eng in self.engine.entry_engines.values():
             eng.direction_filter = value
         self.statusBar().showMessage(f"🧭 Filter arah entry: {value}", 10000)
+
+    def _on_htf_interval_changed(self, interval: str):
+        """User ganti timeframe bias HTF — berlaku untuk SEMUA symbol; tracker
+        langsung refresh REST interval baru (bias sementara reset sampai tiba)."""
+        if self.engine.set_htf_interval(interval):
+            self.statusBar().showMessage(
+                f"🕐 Timeframe bias HTF: {interval.upper()}", 10000)
 
     def _on_partial(self, symbol: str, entry: dict):
         """Profit ≥ 0.5R → tutup 50% posisi + SL ke breakeven (paper & live;

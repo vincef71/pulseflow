@@ -1,13 +1,16 @@
 """
-HTF Bias Tracker — bias trend timeframe tinggi (4H) per symbol.
+HTF Bias Tracker — bias trend timeframe tinggi (interval dipilih user) per symbol.
 
 Berbeda dengan MarketContextTracker (bar 1m dibangun dari trade stream),
-bar 4H tidak mungkin di-warm-up dari trade live — tracker ini murni REST:
-fetch klines 4h Binance Futures saat start lalu refresh berkala di
-background thread. Formula bias sama dengan konteks 1m (spread EMA20/50 +
-slope EMA-cepat, dinormalisasi ATR-4H → [-1, +1]) supaya skalanya konsisten.
+bar HTF tidak mungkin di-warm-up dari trade live — tracker ini murni REST:
+fetch klines Binance Futures saat start lalu refresh berkala di background
+thread. Formula bias sama dengan konteks 1m (spread EMA20/50 + slope
+EMA-cepat, dinormalisasi ATR-HTF → [-1, +1]) supaya skalanya konsisten.
 
-Dipakai untuk filter arah entry (mode AUTO: hanya entry searah bias 4H)
+Interval bisa diganti runtime lewat `set_interval()` (GUI combo /
+--htf-interval headless / control.json); worker langsung refresh ulang.
+
+Dipakai untuk filter arah entry (mode AUTO: hanya entry searah bias HTF)
 dan ditampilkan di entry card / heartbeat headless.
 
 Threading: worker menulis `self._cached` dengan penggantian dict utuh
@@ -20,9 +23,10 @@ import math
 import threading
 import time
 import urllib.request
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pulseflow.analytics.context import _clamp, _ema_series
+from pulseflow.config.settings import HTF_BIAS_CONFIG
 
 logger = logging.getLogger("PulseFlow.HTFBias")
 
@@ -31,21 +35,27 @@ _BINANCE_KLINES = ("https://fapi.binance.com/fapi/v1/klines"
 
 
 class HTFBiasTracker:
-    """Satu instance per-symbol. `start()` sekali; `snapshot()` kapan pun."""
+    """Satu instance per-symbol. `start()` sekali; `snapshot()` kapan pun.
 
-    INTERVAL     = "4h"
-    LIMIT        = 120        # 120 bar 4H ≈ 20 hari
+    `interval` menentukan timeframe bias (default dari HTF_BIAS_CONFIG) dan
+    bisa diganti runtime lewat `set_interval()`.
+    """
+
+    LIMIT        = 120        # 120 bar HTF (≈ 5 hari @1h, 20 hari @4h)
     EMA_FAST     = 20
     EMA_SLOW     = 50
     ATR_PERIOD   = 14
     MIN_READY    = 55         # bar minimum sebelum bias dianggap valid
-    REFRESH_SEC  = 300        # refresh tiap 5 menit (bar 4H berubah lambat)
+    REFRESH_SEC  = 300        # refresh tiap 5 menit (bar HTF berubah lambat)
     FLAT_BAND    = 0.15       # |bias| di bawah ini = FLAT
 
-    def __init__(self, symbol: str = "__default__"):
+    def __init__(self, symbol: str = "__default__",
+                 interval: Optional[str] = None):
         self.symbol = symbol
+        self.interval = (interval or HTF_BIAS_CONFIG["interval"]).lower()
         self._cached: Dict[str, Any] = self._empty()
         self._stop_ev = threading.Event()
+        self._wake = threading.Event()   # bangunkan worker (stop / ganti interval)
         self._thread = None
 
     def start(self):
@@ -57,6 +67,18 @@ class HTFBiasTracker:
 
     def stop(self):
         self._stop_ev.set()
+        self._wake.set()
+
+    def set_interval(self, interval: str):
+        """Ganti timeframe bias runtime; worker langsung refresh ulang."""
+        interval = (interval or "").lower()
+        if not interval or interval == self.interval:
+            return
+        self.interval = interval
+        # Reset cache supaya konsumen tidak memakai bias interval lama saat
+        # data interval baru belum tiba.
+        self._cached = self._empty()
+        self._wake.set()
 
     def snapshot(self) -> Dict[str, Any]:
         return dict(self._cached)
@@ -68,18 +90,26 @@ class HTFBiasTracker:
             try:
                 self._refresh()
             except Exception as e:
-                logger.warning("Bias 4H %s gagal refresh: %s", self.symbol, e)
-            self._stop_ev.wait(self.REFRESH_SEC)
+                logger.warning("Bias HTF %s %s gagal refresh: %s",
+                               self.interval, self.symbol, e)
+            # Tidur sampai REFRESH_SEC atau dibangunkan (stop / ganti interval)
+            self._wake.wait(self.REFRESH_SEC)
+            self._wake.clear()
 
     def _refresh(self):
+        interval = self.interval   # snapshot: aman bila diganti saat berjalan
         sym = self.symbol.upper()
         if not sym.endswith("USDT"):
             sym += "USDT"
-        url = _BINANCE_KLINES.format(symbol=sym, interval=self.INTERVAL,
+        url = _BINANCE_KLINES.format(symbol=sym, interval=interval,
                                      limit=self.LIMIT)
         with urllib.request.urlopen(url, timeout=10) as resp:
             rows = json.loads(resp.read().decode())
-        # Baris terakhir = bar yang masih terbentuk — tetap dipakai (bias 4H
+        # Interval diganti saat fetch berlangsung → buang hasil interval lama
+        # supaya tidak menimpa cache kosong yang menunggu interval baru.
+        if interval != self.interval:
+            return
+        # Baris terakhir = bar yang masih terbentuk — tetap dipakai (bias HTF
         # harus merespons pergerakan intrabar), tapi dicatat di n_bars closed.
         bars: List[Dict[str, float]] = [{
             "high": float(r[2]), "low": float(r[3]), "close": float(r[4]),
@@ -110,6 +140,7 @@ class HTFBiasTracker:
         first = self._cached.get("ready") is False
         self._cached = {
             "ready": len(bars) >= self.MIN_READY and atr > 0,
+            "interval": interval,
             "n_bars": len(bars),
             "bias": float(round(bias, 3)),
             "trend": ("UP" if bias > self.FLAT_BAND else
@@ -121,11 +152,10 @@ class HTFBiasTracker:
             "ts": time.time(),
         }
         if first and self._cached["ready"]:
-            logger.info("Bias 4H %s siap: %s (%+.2f)", sym,
+            logger.info("Bias HTF %s %s siap: %s (%+.2f)", interval, sym,
                         self._cached["trend"], bias)
 
-    @staticmethod
-    def _empty(n_bars: int = 0) -> Dict[str, Any]:
-        return {"ready": False, "n_bars": n_bars, "bias": 0.0,
-                "trend": "FLAT", "ema_fast": 0.0, "ema_slow": 0.0,
+    def _empty(self, n_bars: int = 0) -> Dict[str, Any]:
+        return {"ready": False, "interval": self.interval, "n_bars": n_bars,
+                "bias": 0.0, "trend": "FLAT", "ema_fast": 0.0, "ema_slow": 0.0,
                 "atr_4h": 0.0, "last_close": 0.0, "ts": time.time()}

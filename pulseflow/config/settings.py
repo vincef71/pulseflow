@@ -27,6 +27,15 @@ DAILY_ATR_CONFIG = {
     "interval": "1d", # kline interval
 }
 
+# HTF Bias — timeframe tinggi untuk filter arah entry (mode AUTO).
+# Interval bisa dipilih user: combo di GUI atau --htf-interval headless
+# (juga via control.json → key "htf_interval", hot-reload tanpa restart).
+HTF_BIAS_CONFIG = {
+    "interval": "1h",  # default timeframe bias HTF
+    # Interval Binance yang diizinkan untuk dipilih user
+    "allowed": ["15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"],
+}
+
 # Weights for Aggression Score
 AGGRESSION_WEIGHTS = {
     "volume_velocity": 0.30,

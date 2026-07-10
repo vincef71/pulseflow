@@ -3,7 +3,8 @@ import time
 import logging
 import threading
 from typing import Dict, Any, List, Callable, Optional
-from pulseflow.config.settings import DEFAULT_SYMBOLS, TICK_INTERVAL_MS, DAILY_ATR_CONFIG
+from pulseflow.config.settings import (DEFAULT_SYMBOLS, TICK_INTERVAL_MS,
+                                        DAILY_ATR_CONFIG, HTF_BIAS_CONFIG)
 from pulseflow.core.buffer import MarketTicker
 from pulseflow.velocity.calculator import VelocityCalculator
 from pulseflow.signals.detector import SignalDetector
@@ -25,9 +26,11 @@ class PulseEngine:
     Core engine coordinating data ingestion, rolling calculations, 
     real-time anomaly and signal detection, UI state updates, and storage.
     """
-    def __init__(self, mode: str = "live", symbols: Optional[List[str]] = None):
+    def __init__(self, mode: str = "live", symbols: Optional[List[str]] = None,
+                 htf_interval: Optional[str] = None):
         self.mode = mode  # "live" or "simulated"
         self.symbols = symbols or DEFAULT_SYMBOLS
+        self.htf_interval = (htf_interval or HTF_BIAS_CONFIG["interval"]).lower()
         self.is_running = False
         
         # Pipelines for each active symbol
@@ -78,7 +81,8 @@ class PulseEngine:
             self.entry_engines[symbol] = EntrySignalEngine(symbol=symbol)
             self.daily_atr[symbol] = DailyATRTracker(period=DAILY_ATR_CONFIG["period"])
             self.context_trackers[symbol] = MarketContextTracker(symbol=symbol)
-            self.htf_bias[symbol] = HTFBiasTracker(symbol=symbol)
+            self.htf_bias[symbol] = HTFBiasTracker(
+                symbol=symbol, interval=self.htf_interval)
             self.feeds[symbol] = []
 
     def register_ui_callback(self, callback: Callable[[str, Dict[str, Any], List[Dict[str, Any]]], None]):
@@ -112,6 +116,20 @@ class PulseEngine:
         with self._depth_cb_lock:
             if callback in self._depth_callbacks:
                 self._depth_callbacks.remove(callback)
+
+    def set_htf_interval(self, interval: str) -> bool:
+        """Ganti timeframe bias HTF untuk SEMUA symbol runtime (GUI / headless).
+        Return True bila interval valid & diterapkan."""
+        interval = (interval or "").lower()
+        if interval not in HTF_BIAS_CONFIG["allowed"]:
+            logger.warning("Interval HTF %r tidak diizinkan (pilihan: %s)",
+                           interval, ", ".join(HTF_BIAS_CONFIG["allowed"]))
+            return False
+        self.htf_interval = interval
+        for tracker in self.htf_bias.values():
+            tracker.set_interval(interval)
+        logger.info("Interval bias HTF diganti → %s (semua symbol)", interval)
+        return True
 
     @property
     def tick_count(self) -> int:

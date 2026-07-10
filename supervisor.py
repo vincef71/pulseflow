@@ -257,19 +257,27 @@ def build_report() -> str:
     else:
         L.append("📊 Belum ada trade hari ini")
 
-    # Bias 4H per symbol yang dilacak runner
+    # Bias HTF per symbol yang dilacak runner — interval ikut control.json
     if syms:
+        htf_iv = None
+        if CONTROL_FILE.exists():
+            try:
+                htf_iv = json.loads(
+                    CONTROL_FILE.read_text(encoding="utf-8")).get("htf_interval")
+            except Exception:
+                htf_iv = None
         parts = []
         for s in list(syms)[:6]:
             try:
-                t = HTFBiasTracker(s)
+                t = HTFBiasTracker(s, interval=htf_iv)
                 t._refresh()
                 b = t.snapshot()
                 arrow = {"UP": "▲", "DOWN": "▼"}.get(b["trend"], "─")
                 parts.append(f"{s.replace('USDT', '')} {arrow}{b['bias']:+.2f}")
             except Exception:
                 parts.append(f"{s.replace('USDT', '')} ?")
-        L.append("🧭 Bias 4H: " + " · ".join(parts))
+        iv_lbl = (htf_iv or HTFBiasTracker().interval).upper()
+        L.append(f"🧭 Bias {iv_lbl}: " + " · ".join(parts))
 
     # control.json
     if CONTROL_FILE.exists():

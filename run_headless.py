@@ -49,7 +49,8 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-from pulseflow.config.settings import DEFAULT_SYMBOLS, TICK_INTERVAL_MS
+from pulseflow.config.settings import (DEFAULT_SYMBOLS, TICK_INTERVAL_MS,
+                                        HTF_BIAS_CONFIG)
 from pulseflow.core.engine import PulseEngine
 from pulseflow.trading.executor import TradeExecutor
 
@@ -430,7 +431,7 @@ class ControlFile:
         # risk saat runner start (.env/CLI) — risk_pct null = kembali ke ini
         self._default_risk = executor.risk_pct
 
-    def ensure_exists(self, direction: str):
+    def ensure_exists(self, direction: str, htf_interval: str = None):
         """Buat file dari nilai CLI bila belum ada. Bila sudah ada, isi
         file yang menang atas CLI (di-apply lewat poll(force=True))."""
         if self.path.exists():
@@ -438,6 +439,7 @@ class ControlFile:
         cfg = {
             "armed": True,
             "direction": direction,
+            "htf_interval": htf_interval or self.engine.htf_interval,
             "risk_pct": None,
             "symbols_paused": [],
             "max_daily_loss_pct": 3.0,
@@ -476,6 +478,10 @@ class ControlFile:
                                   "auto_strict") else "BOTH"
         for eng in self.engine.entry_engines.values():
             eng.direction_filter = dval
+
+        htf = cfg.get("htf_interval")
+        if htf and str(htf).lower() != self.engine.htf_interval:
+            self.engine.set_htf_interval(str(htf))
 
         risk = cfg.get("risk_pct")
         if risk is None:
@@ -582,7 +588,8 @@ async def _heartbeat(engine: PulseEngine, trader: HeadlessTrader,
 
 
 async def _amain(args, executor: TradeExecutor):
-    engine = PulseEngine(mode=args.mode, symbols=args.symbols)
+    engine = PulseEngine(mode=args.mode, symbols=args.symbols,
+                         htf_interval=args.htf_interval)
     for eng in engine.entry_engines.values():
         eng.direction_filter = args.direction.upper() if args.direction != "both" else "BOTH"
     trader = HeadlessTrader(
@@ -591,7 +598,7 @@ async def _amain(args, executor: TradeExecutor):
 
     # control.json — hot-reload setelan runtime (file menang atas CLI)
     ctrl = ControlFile(CONTROL_FILE, engine, trader, executor)
-    ctrl.ensure_exists(args.direction)
+    ctrl.ensure_exists(args.direction, args.htf_interval)
     ctrl.poll(force=True)
 
     engine.register_ui_callback(trader.on_tick)
@@ -644,6 +651,11 @@ def _parse_args():
                    help="filter arah entry: long/short only, auto = searah "
                         "bias 4H, auto_strict = searah 4H DAN bias 1m "
                         "(tunggu resumption pullback) (default: both)")
+    p.add_argument("--htf-interval", dest="htf_interval",
+                   choices=list(HTF_BIAS_CONFIG["allowed"]),
+                   default=HTF_BIAS_CONFIG["interval"],
+                   help="timeframe bias HTF untuk filter arah AUTO "
+                        f"(default: {HTF_BIAS_CONFIG['interval']})")
     p.add_argument("--risk", type=float, default=None, metavar="PCT",
                    help="override risk %% per trade (default: RISK_PCT .env)")
     p.add_argument("--warmup", type=float, default=90.0, metavar="SEC",
@@ -683,11 +695,11 @@ def main():
 
     logger.info(
         "PulseFlow HEADLESS start — mode data: %s · symbols: %s · exec: %s · "
-        "risk %.2f%%/trade · leverage %dx · warmup %.0fs · arah: %s",
+        "risk %.2f%%/trade · leverage %dx · warmup %.0fs · arah: %s · HTF: %s",
         args.mode, ", ".join(args.symbols),
         "PAPER" if executor.paper_mode else "🔴 LIVE",
         executor.risk_pct, executor.leverage, args.warmup,
-        args.direction.upper())
+        args.direction.upper(), args.htf_interval.upper())
 
     try:
         asyncio.run(_amain(args, executor))
