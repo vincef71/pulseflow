@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "pulseflow_nu",
+  "project_id": "44459280-14ca-4284-b261-9793266491d1"
+}

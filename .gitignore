@@ -16,3 +16,8 @@ venv/
 
 # Laporan sinyal ter-generate (dibuat ulang tiap jam oleh xau_entry_signal.py)
 reports/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
