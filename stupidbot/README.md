@@ -70,7 +70,34 @@ python main.py walkforward --symbol BTCUSDT --folds 4 \
 
 python main.py portfolio --symbols BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT \
     --entry-tf 1h --start 2024-01-01 --end 2026-06-30
+
+# runner paper (default, aman): simulasi penuh dari candle closed
+python main.py live --symbols BTCUSDT,ETHUSDT --entry-tf 1h
+
+# runner LIVE (uang nyata) — double opt-in:
+#   1. set PAPER_MODE=false di ../.env
+#   2. tambahkan flag --live
+python main.py live --symbols BTCUSDT --entry-tf 1h --live
 ```
+
+## Live / paper runner
+
+`live/runner.py` memakai alur keputusan yang SAMA dengan backtester,
+ditambah eksekusi:
+
+- **Paper** — simulasi penuh; jurnal `logs/paper_live_trades_{tf}.jsonl`.
+- **Live** — via `trading/executor.py` (subclass `TradeExecutor` PulseFlow,
+  kredensial dari `../.env`): entry market + SL/TP conditional DI EXCHANGE
+  (Algo Order API), jadi posisi tetap terlindungi walau bot mati. Partial
+  TP / BE / trailing disinkronkan setiap candle close; bila SL gagal
+  terpasang posisi ditutup paksa (fail-safe).
+- State (posisi, tier risiko, guard, kuota bulanan) dipersist ke
+  `state/live_state.json` — restart aman.
+- `--once` menjalankan satu siklus lalu keluar (untuk uji / scheduler).
+
+Catatan balance kecil: risiko tier terendah bisa menghasilkan notional di
+bawah minimum Binance (~$100) — order tersebut ditolak exchange dan hanya
+tercatat di log. Sesuaikan `risk_tiers_pct` via `config.json` bila perlu.
 
 Override parameter lewat `config.json` (key = field `Settings`), contoh:
 

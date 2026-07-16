@@ -15,6 +15,10 @@ class TradeLogger:
             for t in trades:
                 f.write(json.dumps(t.to_dict()) + "\n")
 
+    def append(self, trade: Trade) -> None:
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(trade.to_dict()) + "\n")
+
 
 def print_summary(stats: dict, title: str = "RINGKASAN BACKTEST") -> None:
     print(f"\n=== {title} ===")

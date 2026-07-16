@@ -85,6 +85,47 @@ def cmd_portfolio(args) -> None:
     print(f"\nLog trade: {log_path}")
 
 
+def cmd_live(args) -> None:
+    import logging
+    from pathlib import Path
+
+    Path("logs").mkdir(exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout),
+                  logging.FileHandler("logs/live.log", encoding="utf-8")])
+
+    cfg = Settings.load(args.config)
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+
+    # Double opt-in untuk LIVE: flag --live DAN PAPER_MODE=false di ../.env.
+    import os
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    env_paper = os.getenv("PAPER_MODE", "true").strip().lower() == "true"
+    live = args.live and not env_paper
+
+    executor = None
+    if args.live and env_paper:
+        print("⚠️  --live diminta tapi PAPER_MODE=true di ../.env — tetap PAPER.")
+        print("    Untuk live sungguhan: set PAPER_MODE=false di ../.env lalu ulangi.")
+    if live:
+        from trading.executor import StupidbotExecutor
+        executor = StupidbotExecutor(live=True)
+        chk = executor.verify_connection()
+        if not chk.get("ok"):
+            print(f"❌ Koneksi Binance gagal: {chk.get('error')} — batal.")
+            return
+        print(f"🔴 LIVE MODE — balance USDT: {chk['usdt_balance']:.2f}. "
+              f"Order sungguhan akan ditempatkan dengan SL/TP di exchange.")
+
+    from live.runner import LiveTrader
+    trader = LiveTrader(cfg, symbols, args.entry_tf, live, executor,
+                        paper_balance=args.balance)
+    trader.run(once=args.once)
+
+
 def cmd_walkforward(args) -> None:
     cfg = Settings.load(args.config)
     start, end, daily, entry = load_data(args)
@@ -124,6 +165,19 @@ def main() -> None:
     sp.add_argument("--symbols", default="BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT",
                     help="daftar simbol dipisah koma")
     sp.set_defaults(func=cmd_portfolio)
+
+    sp = sub.add_parser("live", help="runner live/paper — polling candle closed")
+    sp.add_argument("--symbols", default="BTCUSDT",
+                    help="daftar simbol dipisah koma")
+    sp.add_argument("--entry-tf", default="1h", choices=["1h", "15m"])
+    sp.add_argument("--balance", type=float, default=10_000.0,
+                    help="balance awal PAPER (live pakai balance akun)")
+    sp.add_argument("--config", default="config.json")
+    sp.add_argument("--live", action="store_true",
+                    help="mode LIVE — butuh JUGA PAPER_MODE=false di ../.env")
+    sp.add_argument("--once", action="store_true",
+                    help="satu siklus lalu keluar (untuk uji / task scheduler)")
+    sp.set_defaults(func=cmd_live)
 
     args = p.parse_args()
     args.func(args)
