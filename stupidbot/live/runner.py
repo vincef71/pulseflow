@@ -31,6 +31,7 @@ from core.models import Candle, Direction, Signal
 from daily_bias.bias import DailyBiasEngine
 from data.binance import get_recent, interval_ms
 from entry_engine.engine import EntryEngine
+from logger.market_status import format_market_status
 from logger.trade_log import TradeLogger
 from position_manager.manager import Fill, Position, PositionManager
 from risk_manager.risk import AdaptiveRisk, EquityGuard, TradeThrottle, position_size
@@ -202,6 +203,41 @@ class LiveTrader:
 
         self._maybe_enter(fresh)
         self._save_state()
+        self._print_status()
+
+    def _print_status(self) -> None:
+        """Blok analisa market per simbol — untuk verifikasi manual user."""
+        now = int(time.time() * 1000)
+        header = (f"── STATUS MARKET — balance {self._balance():,.2f} | "
+                  f"tier risiko {self.adaptive.current_pct}% | "
+                  f"kuota bulan {self.throttle.count}/{self.cfg.max_trades_per_month}")
+        if not self.guard.allowed(now):
+            from datetime import datetime, timezone
+            until = datetime.fromtimestamp(self.guard.block_until_ts / 1000,
+                                           tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            header += f" | ⛔ EQUITY PROTECTION aktif s/d {until} UTC"
+        logger.info(header)
+        for s in self.symbols:
+            candle = self.entry[s]._cur
+            if candle is None:
+                continue
+            note = ""
+            if s not in self.positions and s not in self.pendings:
+                bias, bias_reason = self.bias[s].bias()
+                if bias == Direction.NEUTRAL:
+                    note = f"TIDAK ENTRY — {bias_reason}"
+                else:
+                    sig = self.entry[s].check(bias, bias_reason, self.bias[s])
+                    if sig is not None:
+                        note = ("SINYAL VALID — menunggu slot/gate "
+                                "(guard/kuota/cooldown/slot penuh)")
+                    else:
+                        note = f"TIDAK ENTRY — {self.entry[s].last_reject}"
+            for line in format_market_status(
+                    s, self.tf, self.cfg, candle, self.bias[s], self.entry[s],
+                    position=self.positions.get(s),
+                    pending=self.pendings.get(s), status_note=note):
+                logger.info(line)
 
     def _process_candle(self, s: str, candle: Candle) -> None:
         self._feed_daily(s, candle.ts)
