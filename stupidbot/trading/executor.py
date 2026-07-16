@@ -47,6 +47,84 @@ class StupidbotExecutor(TradeExecutor):
         LIVE_LOG.write_text(
             json.dumps(logs, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    # ── Entry limit (no market order) ─────────────────────────────────
+    def place_limit_entry(self, symbol: str, direction: str, qty: float,
+                          price: float, leverage: int | None = None) -> dict:
+        """Pasang LIMIT GTC untuk entry (maker). Tidak ada market order."""
+        from binance.enums import (SIDE_BUY, SIDE_SELL,
+                                   FUTURE_ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC)
+        bsymbol = self.to_binance_symbol(symbol)
+        flt = self._filters(bsymbol)
+        try:
+            self.client().futures_change_leverage(
+                symbol=bsymbol, leverage=leverage or self.leverage)
+        except Exception as e:
+            logger.warning("Set leverage gagal (%s) — lanjut leverage akun", e)
+        order = self.client().futures_create_order(
+            symbol=bsymbol,
+            side=SIDE_BUY if direction == "LONG" else SIDE_SELL,
+            type=FUTURE_ORDER_TYPE_LIMIT,
+            timeInForce=TIME_IN_FORCE_GTC,
+            quantity=_fmt(_round_step(qty, flt["stepSize"]), flt["stepSize"]),
+            price=_fmt(_round_step(price, flt["tickSize"]), flt["tickSize"]))
+        logger.info("🔴 LIVE limit entry %s %s qty %s @ %s (orderId %s)",
+                    direction, bsymbol, qty, price, order.get("orderId"))
+        return order
+
+    def order_status(self, symbol: str, order_id: int) -> dict:
+        """Status order: NEW / PARTIALLY_FILLED / FILLED / CANCELED / EXPIRED."""
+        od = self.client().futures_get_order(
+            symbol=self.to_binance_symbol(symbol), orderId=order_id)
+        return {"status": od.get("status"),
+                "executed_qty": float(od.get("executedQty") or 0.0),
+                "avg_price": float(od.get("avgPrice") or 0.0)}
+
+    def cancel_order(self, symbol: str, order_id: int) -> None:
+        try:
+            self.client().futures_cancel_order(
+                symbol=self.to_binance_symbol(symbol), orderId=order_id)
+        except Exception as e:
+            logger.warning("Cancel order %s #%s gagal: %s", symbol, order_id, e)
+
+    def place_protective_sl(self, symbol: str, direction: str, sl: float) -> dict:
+        """STOP_MARKET closePosition — dipasang BERSAMAAN dengan limit entry
+        sehingga posisi terlindungi sejak detik pertama terisi. Bila trigger
+        tersentuh tanpa posisi, order hangus tanpa efek."""
+        from binance.enums import SIDE_BUY, SIDE_SELL
+        bsymbol = self.to_binance_symbol(symbol)
+        tick = self._filters(bsymbol)["tickSize"]
+        exit_side = SIDE_SELL if direction == "LONG" else SIDE_BUY
+        sl_s = _fmt(_round_step(sl, tick), tick) if tick else str(sl)
+        return self._place_conditional(bsymbol, exit_side, "STOP_MARKET", sl_s)
+
+    def place_reduce_limits(self, symbol: str, direction: str,
+                            legs: list[tuple[float, float]]) -> list:
+        """TP sebagai LIMIT reduce-only (maker): legs = [(price, qty), ...].
+        Butuh posisi sudah terisi. Leg yang gagal dilewati (posisi tetap
+        ber-SL stop-market)."""
+        from binance.enums import (SIDE_BUY, SIDE_SELL,
+                                   FUTURE_ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC)
+        bsymbol = self.to_binance_symbol(symbol)
+        flt = self._filters(bsymbol)
+        exit_side = SIDE_SELL if direction == "LONG" else SIDE_BUY
+        out = []
+        for price, qty in legs:
+            q = _round_step(qty, flt["stepSize"])
+            if q < flt["minQty"]:
+                continue
+            try:
+                out.append(self.client().futures_create_order(
+                    symbol=bsymbol, side=exit_side,
+                    type=FUTURE_ORDER_TYPE_LIMIT,
+                    timeInForce=TIME_IN_FORCE_GTC,
+                    quantity=_fmt(q, flt["stepSize"]),
+                    price=_fmt(_round_step(price, flt["tickSize"]), flt["tickSize"]),
+                    reduceOnly=True))
+            except Exception as e:
+                logger.warning("TP limit %s @ %s gagal (posisi tetap ber-SL): %s",
+                               bsymbol, price, e)
+        return out
+
     # ── Utilitas posisi ───────────────────────────────────────────────
     def position_amount(self, symbol: str) -> float:
         """Jumlah posisi bertanda (+long / −short); 0 = tidak ada posisi."""
@@ -126,12 +204,24 @@ class StupidbotExecutor(TradeExecutor):
         return result
 
     def cancel_protection(self, symbol: str) -> None:
-        """Bersihkan algo order yatim setelah posisi ditutup exchange
-        (SL terisi → TP kondisional masih menggantung, atau sebaliknya)."""
+        """Bersihkan SEMUA order sisa symbol ini setelah posisi tutup:
+        algo conditional (SL) + order biasa (limit TP reduce-only yatim)."""
+        bsymbol = self.to_binance_symbol(symbol)
         try:
-            self._cancel_all_conditional(self.to_binance_symbol(symbol))
+            self._cancel_all_conditional(bsymbol)
         except Exception as e:
-            logger.warning("Cancel proteksi sisa %s gagal: %s", symbol, e)
+            logger.warning("Cancel algo sisa %s gagal: %s", symbol, e)
+        try:
+            self.client().futures_cancel_all_open_orders(symbol=bsymbol)
+        except Exception as e:
+            logger.warning("Cancel order sisa %s gagal: %s", symbol, e)
 
     def mark_closed(self, symbol: str, reason: str) -> None:
         self._mark_live_closed(self.to_binance_symbol(symbol), reason)
+
+    def journal_open(self, rec: dict) -> None:
+        """Catat posisi terisi ke jurnal live (konteks analitik; sumber PnL
+        resmi tetap data exchange)."""
+        rec.setdefault("status", "LIVE_OPEN")
+        rec["symbol"] = self.to_binance_symbol(rec.get("symbol", ""))
+        self._append_live_log(rec)

@@ -24,6 +24,7 @@ class Position:
     init_qty: float
     risk_amount: float
     risk_pct: float = 0.0
+    opened_ts: int = 0  # ts candle saat limit terisi — manajemen mulai candle berikutnya
     sl: float = 0.0
     partial_done: bool = False
     mfe_r: float = 0.0

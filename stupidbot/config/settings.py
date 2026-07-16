@@ -14,7 +14,8 @@ class Settings:
     risk_per_trade_pct: float = 1.0    # fallback bila adaptive risk dimatikan
     min_rr: float = 2.0                # RR minimum, tidak boleh diturunkan
     max_rr: float = 5.0                # RR maksimum yang dikejar dari struktur
-    fee_pct: float = 0.05              # taker fee per sisi (%)
+    fee_pct: float = 0.05              # taker fee per sisi (%) — SL / exit market
+    maker_fee_pct: float = 0.02        # maker fee per sisi (%) — entry limit & TP limit
 
     # --- Adaptive risk ---
     # tier naik satu tingkat HANYA saat equity mencetak high baru;
@@ -37,9 +38,8 @@ class Settings:
 
     # --- ATR (satu-satunya indikator yang diizinkan) ---
     atr_period: int = 14
-    atr_sl_buffer_mult: float = 0.25   # buffer SL di bawah/atas candle rejection
-    min_stop_atr_mult: float = 0.5     # jarak stop minimal (x ATR) agar tidak terlalu ketat
-    max_stop_atr_mult: float = 3.0     # jarak stop maksimal (x ATR); lebih dari ini = setup messy
+    atr_sl_buffer_mult: float = 0.25   # LIMIT entry dipasang sejauh ini di bawah/atas wick rejection
+    limit_sl_atr_mult: float = 1.0     # jarak SL dari harga limit entry (x ATR)
 
     # --- Filter volatilitas ---
     min_daily_atr_pct: float = 1.0     # ATR Daily minimal sebagai % harga; di bawah ini pasar mati

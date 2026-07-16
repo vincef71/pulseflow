@@ -13,10 +13,11 @@ Lapisan proteksi akun (risk_manager):
 - EquityGuard   : dd harian / dd total menghentikan entry baru sementara.
 - TradeThrottle : batas trade per bulan + jeda antar entry.
 """
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from config.settings import Settings
-from core.models import Candle, Direction, Trade
+from core.models import Candle, Direction, Signal, Trade, Trend
 from daily_bias.bias import DailyBiasEngine
 from entry_engine.engine import EntryEngine
 from position_manager.manager import Fill, Position, PositionManager
@@ -24,9 +25,69 @@ from risk_manager.risk import AdaptiveRisk, EquityGuard, TradeThrottle, position
 
 DAY_MS = 86_400_000
 
+# fill dengan alasan ini = limit order (maker); selain itu market/stop (taker)
+MAKER_REASONS = {"TP", "PARTIAL_TP"}
+
 
 def _iso(ts: int) -> str:
     return datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+@dataclass
+class PendingEntry:
+    """Order limit entry yang belum terisi. Ukuran sudah dihitung saat
+    penempatan (balance saat itu)."""
+    signal: Signal
+    qty: float
+    risk_amount: float
+    risk_pct: float
+    placed_ts: int
+
+
+def pending_action(pending: PendingEntry, candle: Candle, bias: Direction,
+                   entry_trend: Trend) -> str:
+    """Nasib order limit pada candle closed ini: FILL / CANCEL / WAIT.
+
+    Urutan pesimis: sentuhan harga dicek dulu (fill terjadi intrabar,
+    sebelum kondisi close bisa dievaluasi). Cancel = zona/struktur rusak:
+    bias Daily berubah, trend TF entry tidak lagi searah, atau harga
+    breakout meninggalkan pullback tanpa mengisi order.
+    """
+    sig = pending.signal
+    if sig.direction == Direction.LONG:
+        if candle.low <= sig.entry:
+            return "FILL"
+        if bias != Direction.LONG or entry_trend != Trend.UP:
+            return "CANCEL"
+        if candle.close > sig.leg_high:
+            return "CANCEL"  # breakout tanpa kita — pullback selesai
+    else:
+        if candle.high >= sig.entry:
+            return "FILL"
+        if bias != Direction.SHORT or entry_trend != Trend.DOWN:
+            return "CANCEL"
+        if candle.close < sig.leg_low:
+            return "CANCEL"
+    return "WAIT"
+
+
+def fill_pending(pending: PendingEntry, candle: Candle) -> tuple[Position, bool]:
+    """Isi order limit di candle ini. Kembalikan (Position, stopped_same_candle).
+    Pesimis: bila candle yang sama juga menyentuh SL, posisi langsung stop out."""
+    sig = pending.signal
+    pos = Position(signal=sig, qty=pending.qty, init_qty=pending.qty,
+                   risk_amount=pending.risk_amount, risk_pct=pending.risk_pct,
+                   opened_ts=candle.ts)
+    d = 1 if sig.direction == Direction.LONG else -1
+    adverse = candle.low if d == 1 else candle.high
+    if d * (adverse - sig.sl) <= 0:
+        # gap melewati SL → isi di open yang lebih buruk
+        px = candle.open if d * (candle.open - sig.sl) < 0 else sig.sl
+        pos.fills.append(Fill(px, pos.qty, "SL", candle.ts))
+        pos.qty = 0.0
+        pos.mae_r = 1.0
+        return pos, True
+    return pos, False
 
 
 def close_position(cfg: Settings, symbol: str, pos: Position, exit_ts: int) -> tuple[Trade, float]:
@@ -34,8 +95,11 @@ def close_position(cfg: Settings, symbol: str, pos: Position, exit_ts: int) -> t
     sig = pos.signal
     d = 1 if sig.direction == Direction.LONG else -1
     gross = sum(d * (f.price - sig.entry) * f.qty for f in pos.fills)
-    notional = sig.entry * pos.init_qty + sum(f.price * f.qty for f in pos.fills)
-    fees = notional * cfg.fee_pct / 100.0
+    # entry = limit (maker); exit: TP/partial = limit (maker), SL/trail = taker
+    fees = sig.entry * pos.init_qty * cfg.maker_fee_pct / 100.0
+    for f in pos.fills:
+        rate = cfg.maker_fee_pct if f.reason in MAKER_REASONS else cfg.fee_pct
+        fees += f.price * f.qty * rate / 100.0
     pnl = gross - fees
 
     exit_qty = sum(f.qty for f in pos.fills)
@@ -44,9 +108,10 @@ def close_position(cfg: Settings, symbol: str, pos: Position, exit_ts: int) -> t
     if any(f.reason == "PARTIAL_TP" for f in pos.fills) and exit_reason != "PARTIAL_TP":
         exit_reason = f"PARTIAL_TP+{exit_reason}"
 
+    entry_ts = pos.opened_ts or sig.ts
     trade = Trade(
-        entry_ts=sig.ts,
-        entry_date=_iso(sig.ts),
+        entry_ts=entry_ts,
+        entry_date=_iso(entry_ts),
         exit_date=_iso(exit_ts),
         symbol=symbol,
         daily_bias=sig.direction.value,
@@ -89,7 +154,17 @@ class Backtester:
         trades: list[Trade] = []
         equity: list[tuple[int, float]] = [(trade_from_ts, balance)]
         pos: Position | None = None
+        pending: PendingEntry | None = None
         di = 0
+
+        def _record_close(p: Position, ts: int) -> None:
+            nonlocal balance
+            trade, pnl = close_position(cfg, self.symbol, p, ts)
+            balance += pnl
+            adaptive.on_trade_close(balance)
+            guard.on_trade_close(ts, balance)
+            trades.append(trade)
+            equity.append((ts, balance))
 
         for candle in entry:
             # umpankan candle Daily yang sudah tuntas sebelum candle entry ini
@@ -101,15 +176,28 @@ class Backtester:
             guard.on_candle(candle.ts, balance)
 
             if pos is not None:
-                if candle.ts > pos.signal.ts:  # manajemen mulai candle berikutnya
+                if candle.ts > pos.opened_ts:  # manajemen mulai candle berikutnya
                     closed = pos_manager.on_candle(pos, candle, entry_engine.atr.value)
                     if closed:
-                        trade, pnl = close_position(cfg, self.symbol, pos, candle.ts)
-                        balance += pnl
-                        adaptive.on_trade_close(balance)
-                        guard.on_trade_close(candle.ts, balance)
-                        trades.append(trade)
-                        equity.append((candle.ts, balance))
+                        _record_close(pos, candle.ts)
+                        pos = None
+                continue
+
+            if pending is not None:
+                if not guard.allowed(candle.ts):
+                    throttle.on_cancel()
+                    pending = None  # equity protection aktif → tarik order
+                    continue
+                bias, _ = bias_engine.bias()
+                act = pending_action(pending, candle, bias, entry_engine.tracker.trend)
+                if act == "CANCEL":
+                    throttle.on_cancel()
+                    pending = None
+                elif act == "FILL":
+                    pos, stopped = fill_pending(pending, candle)
+                    pending = None
+                    if stopped:
+                        _record_close(pos, candle.ts)
                         pos = None
                 continue
 
@@ -132,8 +220,8 @@ class Backtester:
             qty, risk_amount = position_size(balance, risk_pct, signal.entry, signal.sl)
             if qty <= 0:
                 continue
-            pos = Position(signal=signal, qty=qty, init_qty=qty,
-                           risk_amount=risk_amount, risk_pct=risk_pct)
+            pending = PendingEntry(signal=signal, qty=qty, risk_amount=risk_amount,
+                                   risk_pct=risk_pct, placed_ts=candle.ts)
             throttle.on_entry(candle.ts)
 
         # posisi masih terbuka di akhir data → tutup di close terakhir

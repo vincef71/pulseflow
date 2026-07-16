@@ -21,7 +21,11 @@ Ragu = tidak trading. Melewatkan trade lebih baik daripada mengambil trade jelek
    menentukan boleh long/short. Daily netral → tidak ada trade.
 2. **Entry 1H/15M** (`entry_engine/`) — pullback 38.2–78.6% ke impulse leg
    searah bias + candle rejection (pin bar / engulfing) + RR ≥ 1:2 terhadap
-   target struktural Daily.
+   target struktural Daily. **NO MARKET ORDER**: entry adalah LIMIT di bekas
+   level SL (di bawah/atas wick rejection — area stop-hunt); SL baru = harga
+   limit ∓ `limit_sl_atr_mult` × ATR. Order hidup sampai terisi atau
+   zona/struktur rusak (bias Daily flip, trend TF entry berubah, atau harga
+   breakout tanpa mengisi order). Order yang batal mengembalikan kuota bulanan.
 3. **Risk** (`risk_manager/`) — sizing dari balance × risiko% ÷ jarak stop ATR.
 4. **Manajemen** (`position_manager/`) — partial TP di +1.5R, SL ke breakeven,
    ATR trailing setelah +2R.
@@ -87,10 +91,13 @@ ditambah eksekusi:
 
 - **Paper** — simulasi penuh; jurnal `logs/paper_live_trades_{tf}.jsonl`.
 - **Live** — via `trading/executor.py` (subclass `TradeExecutor` PulseFlow,
-  kredensial dari `../.env`): entry market + SL/TP conditional DI EXCHANGE
-  (Algo Order API), jadi posisi tetap terlindungi walau bot mati. Partial
-  TP / BE / trailing disinkronkan setiap candle close; bila SL gagal
-  terpasang posisi ditutup paksa (fail-safe).
+  kredensial dari `../.env`): LIMIT entry + STOP_MARKET protektif dipasang
+  SERENTAK, jadi posisi terlindungi sejak detik pertama terisi (SL yang
+  trigger tanpa posisi hangus tanpa efek). Setelah terisi, TP dipasang
+  sebagai LIMIT reduce-only (maker) dua leg: partial di +1.5R dan sisa di
+  TP. BE/trailing hanya menggeser STOP_MARKET. Bila SL gagal terpasang,
+  posisi ditutup paksa (fail-safe). Satu-satunya order market yang mungkin
+  terjadi: eksekusi SL (stop-market) dan fail-safe.
 - State (posisi, tier risiko, guard, kuota bulanan) dipersist ke
   `state/live_state.json` — restart aman.
 - `--once` menjalankan satu siklus lalu keluar (untuk uji / scheduler).
@@ -109,5 +116,8 @@ Override parameter lewat `config.json` (key = field `Settings`), contoh:
 
 - Candle Daily baru dipakai setelah harinya close penuh.
 - Swing terkonfirmasi dengan lag k candle (tanpa lookahead).
+- Limit terisi bila harga menyentuh level; fill + SL di candle yang sama →
+  SL dianggap kena (pesimis).
 - SL + TP tersentuh di candle yang sama → SL dianggap kena dulu (pesimis).
-- Fee taker dihitung dua sisi.
+- Fee dibedakan: maker (`maker_fee_pct`) untuk entry limit & TP limit,
+  taker (`fee_pct`) untuk SL/trailing/exit paksa.

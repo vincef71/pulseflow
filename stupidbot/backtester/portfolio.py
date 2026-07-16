@@ -9,7 +9,8 @@ adaptive risk, equity guard, dan trade throttle dibagi bersama.
 """
 from collections import defaultdict
 
-from backtester.backtest import DAY_MS, close_position, summarize
+from backtester.backtest import (DAY_MS, PendingEntry, close_position,
+                                 fill_pending, pending_action, summarize)
 from config.settings import Settings
 from core.models import Candle, Direction, Trade
 from daily_bias.bias import DailyBiasEngine
@@ -48,6 +49,16 @@ class PortfolioBacktester:
         trades: list[Trade] = []
         equity: list[tuple[int, float]] = [(trade_from_ts, balance)]
         positions: dict[str, Position] = {}
+        pendings: dict[str, PendingEntry] = {}
+
+        def _record_close(s: str, p: Position, ts: int) -> None:
+            nonlocal balance
+            trade, pnl = close_position(cfg, s, p, ts)
+            balance += pnl
+            adaptive.on_trade_close(balance)
+            guard.on_trade_close(ts, balance)
+            trades.append(trade)
+            equity.append((ts, balance))
 
         for ts in timeline:
             candles = by_ts[ts]
@@ -65,28 +76,46 @@ class PortfolioBacktester:
             for s in list(positions.keys()):
                 candle = candles.get(s)
                 pos = positions[s]
-                if candle is None or candle.ts <= pos.signal.ts:
+                if candle is None or candle.ts <= pos.opened_ts:
                     continue
                 closed = pos_manager.on_candle(pos, candle, entry_engines[s].atr.value)
                 if closed:
-                    trade, pnl = close_position(cfg, s, pos, candle.ts)
-                    balance += pnl
-                    adaptive.on_trade_close(balance)
-                    guard.on_trade_close(ts, balance)
-                    trades.append(trade)
-                    equity.append((ts, balance))
+                    _record_close(s, pos, candle.ts)
                     del positions[s]
 
-            # 3. entry baru — hanya struktur Daily terbaik yang boleh masuk
+            # 3. nasib order limit yang menunggu
+            for s in list(pendings.keys()):
+                candle = candles.get(s)
+                if candle is None:
+                    continue
+                if not guard.allowed(ts):
+                    throttle.on_cancel()
+                    del pendings[s]
+                    continue
+                bias, _ = bias_engines[s].bias()
+                act = pending_action(pendings[s], candle, bias,
+                                     entry_engines[s].tracker.trend)
+                if act == "CANCEL":
+                    throttle.on_cancel()
+                    del pendings[s]
+                elif act == "FILL":
+                    pos, stopped = fill_pending(pendings[s], candle)
+                    del pendings[s]
+                    if stopped:
+                        _record_close(s, pos, candle.ts)
+                    else:
+                        positions[s] = pos
+
+            # 4. order baru — hanya struktur Daily terbaik yang boleh masuk
             if ts < trade_from_ts:
                 continue
-            slots = cfg.max_open_positions - len(positions)
+            slots = cfg.max_open_positions - len(positions) - len(pendings)
             if slots <= 0 or not guard.allowed(ts) or not throttle.allowed(ts):
                 continue
 
             candidates: list[tuple[float, str, object]] = []
             for s, candle in candles.items():
-                if s in positions:
+                if s in positions or s in pendings:
                     continue
                 bias, reason = bias_engines[s].bias()
                 if bias == Direction.NEUTRAL:
@@ -107,8 +136,9 @@ class PortfolioBacktester:
                 qty, risk_amount = position_size(balance, risk_pct, signal.entry, signal.sl)
                 if qty <= 0:
                     continue
-                positions[s] = Position(signal=signal, qty=qty, init_qty=qty,
-                                        risk_amount=risk_amount, risk_pct=risk_pct)
+                pendings[s] = PendingEntry(signal=signal, qty=qty,
+                                           risk_amount=risk_amount,
+                                           risk_pct=risk_pct, placed_ts=ts)
                 throttle.on_entry(ts)
 
         # tutup posisi tersisa di candle terakhir masing-masing simbol

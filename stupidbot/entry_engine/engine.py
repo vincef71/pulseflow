@@ -75,15 +75,11 @@ class EntryEngine:
         if pattern is None:
             return None
 
-        # 5. SL berbasis ATR + struktur, RR minimal 1:2
-        entry = candle.close
-        sl = candle.low - self.cfg.atr_sl_buffer_mult * atr
-        stop = entry - sl
-        if stop < self.cfg.min_stop_atr_mult * atr:
-            sl = entry - self.cfg.min_stop_atr_mult * atr
-            stop = entry - sl
-        if stop > self.cfg.max_stop_atr_mult * atr:
-            return None  # stop terlalu lebar → setup messy, lewati
+        # 5. LIMIT entry di bekas level SL (bawah wick rejection — area
+        #    stop-hunt); SL baru lebih dalam berbasis ATR; RR minimal 1:2.
+        entry = candle.low - self.cfg.atr_sl_buffer_mult * atr
+        stop = self.cfg.limit_sl_atr_mult * atr
+        sl = entry - stop
 
         target = daily.nearest_high_above(entry)
         if target is not None:
@@ -96,8 +92,9 @@ class EntryEngine:
 
         tp = entry + rr * stop
         reason = (f"{bias_reason}; pullback {self._depth(high.price, low.price, candle.low):.0f}% "
-                  f"ke zona HL, rejection {pattern}")
-        return Signal(Direction.LONG, candle.ts, entry, sl, tp, rr, atr, pattern, reason)
+                  f"ke zona HL, rejection {pattern}, limit di bekas SL")
+        return Signal(Direction.LONG, candle.ts, entry, sl, tp, rr, atr, pattern,
+                      reason, leg_high=high.price, leg_low=low.price)
 
     # ------------------------------------------------------------------ #
     def _check_short(self, candle: Candle, atr: float, bias_reason: str,
@@ -123,14 +120,9 @@ class EntryEngine:
         if pattern is None:
             return None
 
-        entry = candle.close
-        sl = candle.high + self.cfg.atr_sl_buffer_mult * atr
-        stop = sl - entry
-        if stop < self.cfg.min_stop_atr_mult * atr:
-            sl = entry + self.cfg.min_stop_atr_mult * atr
-            stop = sl - entry
-        if stop > self.cfg.max_stop_atr_mult * atr:
-            return None
+        entry = candle.high + self.cfg.atr_sl_buffer_mult * atr
+        stop = self.cfg.limit_sl_atr_mult * atr
+        sl = entry + stop
 
         target = daily.nearest_low_below(entry)
         if target is not None:
@@ -143,8 +135,9 @@ class EntryEngine:
 
         tp = entry - rr * stop
         reason = (f"{bias_reason}; pullback {self._depth(low.price, high.price, candle.high):.0f}% "
-                  f"ke zona LH, rejection {pattern}")
-        return Signal(Direction.SHORT, candle.ts, entry, sl, tp, rr, atr, pattern, reason)
+                  f"ke zona LH, rejection {pattern}, limit di bekas SL")
+        return Signal(Direction.SHORT, candle.ts, entry, sl, tp, rr, atr, pattern,
+                      reason, leg_high=high.price, leg_low=low.price)
 
     @staticmethod
     def _depth(anchor: float, origin: float, extreme: float) -> float:

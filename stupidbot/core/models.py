@@ -69,13 +69,15 @@ class Swing:
 class Signal:
     direction: Direction
     ts: int
-    entry: float
+    entry: float       # harga LIMIT entry (di bekas level SL, bawah/atas wick rejection)
     sl: float
     tp: float
     rr: float
     atr: float
     pattern: str
     reason: str
+    leg_high: float = 0.0  # swing high leg — pembatalan pending saat breakout tanpa fill
+    leg_low: float = 0.0   # swing low leg
 
 
 @dataclass

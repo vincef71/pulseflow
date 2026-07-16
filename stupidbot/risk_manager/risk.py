@@ -122,6 +122,12 @@ class TradeThrottle:
         self.count += 1
         self.last_entry_ts = ts
 
+    def on_cancel(self) -> None:
+        """Order limit dibatalkan tanpa terisi → kembalikan kuota bulanan
+        (jeda antar entry tetap berlaku)."""
+        if self.count > 0:
+            self.count -= 1
+
     @staticmethod
     def _month(ts: int) -> tuple[int, int]:
         d = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
