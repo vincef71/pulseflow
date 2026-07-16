@@ -21,7 +21,8 @@ def print_summary(stats: dict, title: str = "RINGKASAN BACKTEST") -> None:
     if stats["trades"] == 0:
         print("Tidak ada trade — bot memilih untuk tidak trading di periode ini.")
         return
-    print(f"Jumlah trade      : {stats['trades']}")
+    print(f"Jumlah trade      : {stats['trades']}"
+          + (f" (~{stats['trades_per_month']:.1f}/bulan)" if "trades_per_month" in stats else ""))
     print(f"Win rate          : {stats['win_rate']:.1f}%")
     print(f"Expectancy        : {stats['expectancy_r']:+.2f}R per trade")
     print(f"Profit factor     : {stats['profit_factor']:.2f}")
@@ -29,3 +30,13 @@ def print_summary(stats: dict, title: str = "RINGKASAN BACKTEST") -> None:
     print(f"Total PnL         : {stats['total_pnl']:+.2f} ({stats['return_pct']:+.2f}%)")
     print(f"Max drawdown      : {stats['max_dd_pct']:.2f}%")
     print(f"Balance akhir     : {stats['final_balance']:.2f}")
+
+
+def print_halts(halts: list[tuple[int, str]]) -> None:
+    if not halts:
+        return
+    from datetime import datetime, timezone
+    print(f"\nEquity protection aktif {len(halts)} kali:")
+    for ts, reason in halts:
+        d = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        print(f"  {d}  {reason}")

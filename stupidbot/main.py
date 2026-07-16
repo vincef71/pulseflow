@@ -15,9 +15,10 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from backtester.backtest import DAY_MS, Backtester, walkforward_folds
+from backtester.portfolio import PortfolioBacktester
 from config.settings import Settings
 from data.binance import get_klines, interval_ms
-from logger.trade_log import TradeLogger, print_summary
+from logger.trade_log import TradeLogger, print_halts, print_summary
 
 WARMUP_DAILY = 200          # hari warmup untuk struktur & ATR Daily
 WARMUP_ENTRY_CANDLES = 300  # candle warmup TF entry
@@ -49,6 +50,38 @@ def cmd_backtest(args) -> None:
     TradeLogger(log_path).write_all(result["trades"])
     print_summary(result["stats"], f"BACKTEST {args.symbol} {args.entry_tf} "
                                    f"{args.start} → {args.end}")
+    print_halts(result["halts"])
+    print(f"\nLog trade: {log_path}")
+
+
+def cmd_portfolio(args) -> None:
+    cfg = Settings.load(args.config)
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    start = parse_date(args.start)
+    end = parse_date(args.end)
+
+    data = {}
+    for s in symbols:
+        daily = get_klines(s, "1d", start - WARMUP_DAILY * DAY_MS, end)
+        entry_start = start - WARMUP_ENTRY_CANDLES * interval_ms(args.entry_tf)
+        entry = get_klines(s, args.entry_tf, entry_start, end)
+        data[s] = (daily, entry)
+        print(f"{s}: {len(daily)} candle Daily, {len(entry)} candle {args.entry_tf}")
+
+    pb = PortfolioBacktester(cfg, symbols, args.entry_tf, args.balance)
+    result = pb.run(data, trade_from_ts=start)
+
+    log_path = f"logs/trades_portfolio_{args.entry_tf}.jsonl"
+    TradeLogger(log_path).write_all(result["trades"])
+    print_summary(result["stats"], f"PORTFOLIO {'+'.join(symbols)} {args.entry_tf} "
+                                   f"{args.start} → {args.end}")
+
+    per_symbol = {}
+    for t in result["trades"]:
+        per_symbol[t.symbol] = per_symbol.get(t.symbol, 0) + 1
+    if per_symbol:
+        print("Trade per simbol  : " + ", ".join(f"{s}={n}" for s, n in sorted(per_symbol.items())))
+    print_halts(result["halts"])
     print(f"\nLog trade: {log_path}")
 
 
@@ -85,6 +118,12 @@ def main() -> None:
     sp = sub.add_parser("walkforward", parents=[common], help="uji stabilitas per fold")
     sp.add_argument("--folds", type=int, default=4)
     sp.set_defaults(func=cmd_walkforward)
+
+    sp = sub.add_parser("portfolio", parents=[common],
+                        help="backtest multi-simbol; hanya struktur Daily terbaik yang diisi")
+    sp.add_argument("--symbols", default="BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT",
+                    help="daftar simbol dipisah koma")
+    sp.set_defaults(func=cmd_portfolio)
 
     args = p.parse_args()
     args.func(args)

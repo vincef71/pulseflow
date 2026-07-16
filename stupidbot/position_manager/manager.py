@@ -23,6 +23,7 @@ class Position:
     qty: float
     init_qty: float
     risk_amount: float
+    risk_pct: float = 0.0
     sl: float = 0.0
     partial_done: bool = False
     mfe_r: float = 0.0

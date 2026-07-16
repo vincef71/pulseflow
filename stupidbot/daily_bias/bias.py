@@ -41,6 +41,24 @@ class DailyBiasEngine:
 
         return Direction.NEUTRAL, "struktur Daily netral/range"
 
+    def structure_score(self) -> float:
+        """Skor 0-110 kualitas struktur Daily searah bias — untuk portfolio mode
+        memilih aset dengan struktur terbaik. 0 bila bias netral."""
+        direction, _ = self.bias()
+        if direction == Direction.NEUTRAL:
+            return 0.0
+        good = ("HH", "HL") if direction == Direction.LONG else ("LH", "LL")
+        swings = self.tracker.swings[-6:]
+        if not swings:
+            return 0.0
+        aligned = sum(1 for s in swings if s.label in good) / len(swings)
+        score = aligned * 100.0
+        # bonus bila momentum terakhir mengonfirmasi (BOS searah bias)
+        ev = self.tracker.events[-1] if self.tracker.events else None
+        if ev and ev.type == ("BOS_UP" if direction == Direction.LONG else "BOS_DOWN"):
+            score += 10.0
+        return score
+
     # target struktural untuk perhitungan RR
     def nearest_high_above(self, price: float) -> float | None:
         return self.tracker.nearest_high_above(price)

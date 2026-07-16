@@ -93,6 +93,7 @@ class Trade:
     stop_loss: float
     take_profit: float
     risk_amount: float
+    risk_pct: float
     rr_planned: float
     exit_reason: str
     exit_price: float

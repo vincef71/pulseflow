@@ -7,6 +7,11 @@ Anti-lookahead:
 - Entry dieksekusi di harga close candle sinyal; manajemen posisi baru mulai
   candle berikutnya.
 - Bila SL dan TP tersentuh di candle yang sama, SL dianggap kena dulu (pesimis).
+
+Lapisan proteksi akun (risk_manager):
+- AdaptiveRisk  : tier risiko naik hanya saat equity high baru, turun saat dd.
+- EquityGuard   : dd harian / dd total menghentikan entry baru sementara.
+- TradeThrottle : batas trade per bulan + jeda antar entry.
 """
 from datetime import datetime, timezone
 
@@ -14,14 +19,54 @@ from config.settings import Settings
 from core.models import Candle, Direction, Trade
 from daily_bias.bias import DailyBiasEngine
 from entry_engine.engine import EntryEngine
-from position_manager.manager import Position, PositionManager
-from risk_manager.risk import position_size
+from position_manager.manager import Fill, Position, PositionManager
+from risk_manager.risk import AdaptiveRisk, EquityGuard, TradeThrottle, position_size
 
 DAY_MS = 86_400_000
 
 
 def _iso(ts: int) -> str:
     return datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def close_position(cfg: Settings, symbol: str, pos: Position, exit_ts: int) -> tuple[Trade, float]:
+    """Bangun catatan Trade lengkap dari posisi yang seluruh fill-nya selesai."""
+    sig = pos.signal
+    d = 1 if sig.direction == Direction.LONG else -1
+    gross = sum(d * (f.price - sig.entry) * f.qty for f in pos.fills)
+    notional = sig.entry * pos.init_qty + sum(f.price * f.qty for f in pos.fills)
+    fees = notional * cfg.fee_pct / 100.0
+    pnl = gross - fees
+
+    exit_qty = sum(f.qty for f in pos.fills)
+    exit_price = sum(f.price * f.qty for f in pos.fills) / exit_qty
+    exit_reason = pos.fills[-1].reason
+    if any(f.reason == "PARTIAL_TP" for f in pos.fills) and exit_reason != "PARTIAL_TP":
+        exit_reason = f"PARTIAL_TP+{exit_reason}"
+
+    trade = Trade(
+        entry_ts=sig.ts,
+        entry_date=_iso(sig.ts),
+        exit_date=_iso(exit_ts),
+        symbol=symbol,
+        daily_bias=sig.direction.value,
+        entry_reason=sig.reason,
+        pattern=sig.pattern,
+        atr=round(sig.atr, 8),
+        entry=sig.entry,
+        stop_loss=sig.sl,
+        take_profit=sig.tp,
+        risk_amount=round(pos.risk_amount, 2),
+        risk_pct=pos.risk_pct,
+        rr_planned=round(sig.rr, 2),
+        exit_reason=exit_reason,
+        exit_price=round(exit_price, 8),
+        pnl=round(pnl, 2),
+        r_multiple=round(pnl / pos.risk_amount, 2) if pos.risk_amount else 0.0,
+        mfe_r=round(pos.mfe_r, 2),
+        mae_r=round(pos.mae_r, 2),
+    )
+    return trade, pnl
 
 
 class Backtester:
@@ -36,6 +81,9 @@ class Backtester:
         bias_engine = DailyBiasEngine(cfg)
         entry_engine = EntryEngine(cfg)
         pos_manager = PositionManager(cfg)
+        adaptive = AdaptiveRisk(cfg, self.start_balance)
+        guard = EquityGuard(cfg, self.start_balance)
+        throttle = TradeThrottle(cfg)
 
         balance = self.start_balance
         trades: list[Trade] = []
@@ -50,13 +98,16 @@ class Backtester:
                 di += 1
 
             entry_engine.update(candle)
+            guard.on_candle(candle.ts, balance)
 
             if pos is not None:
                 if candle.ts > pos.signal.ts:  # manajemen mulai candle berikutnya
                     closed = pos_manager.on_candle(pos, candle, entry_engine.atr.value)
                     if closed:
-                        trade, pnl = self._close_trade(pos, candle.ts)
+                        trade, pnl = close_position(cfg, self.symbol, pos, candle.ts)
                         balance += pnl
+                        adaptive.on_trade_close(balance)
+                        guard.on_trade_close(candle.ts, balance)
                         trades.append(trade)
                         equity.append((candle.ts, balance))
                         pos = None
@@ -64,6 +115,10 @@ class Backtester:
 
             if candle.ts < trade_from_ts:
                 continue  # periode warmup: bangun struktur, jangan trading
+            if not guard.allowed(candle.ts):
+                continue  # equity protection aktif
+            if not throttle.allowed(candle.ts):
+                continue  # kuota bulanan / cooldown antar entry
 
             bias, reason = bias_engine.bias()
             if bias == Direction.NEUTRAL:
@@ -73,64 +128,27 @@ class Backtester:
             if signal is None:
                 continue
 
-            qty, risk_amount = position_size(balance, cfg.risk_per_trade_pct,
-                                             signal.entry, signal.sl)
+            risk_pct = adaptive.current_pct
+            qty, risk_amount = position_size(balance, risk_pct, signal.entry, signal.sl)
             if qty <= 0:
                 continue
-            pos = Position(signal=signal, qty=qty, init_qty=qty, risk_amount=risk_amount)
+            pos = Position(signal=signal, qty=qty, init_qty=qty,
+                           risk_amount=risk_amount, risk_pct=risk_pct)
+            throttle.on_entry(candle.ts)
 
         # posisi masih terbuka di akhir data → tutup di close terakhir
         if pos is not None and entry:
             last = entry[-1]
-            from position_manager.manager import Fill
             pos.fills.append(Fill(last.close, pos.qty, "END_OF_DATA", last.ts))
             pos.qty = 0.0
-            trade, pnl = self._close_trade(pos, last.ts)
+            trade, pnl = close_position(cfg, self.symbol, pos, last.ts)
             balance += pnl
             trades.append(trade)
             equity.append((last.ts, balance))
 
         stats = summarize(trades, equity, self.start_balance, balance)
         return {"trades": trades, "equity": equity, "stats": stats,
-                "final_balance": balance}
-
-    # ------------------------------------------------------------------ #
-    def _close_trade(self, pos: Position, exit_ts: int) -> tuple[Trade, float]:
-        sig = pos.signal
-        d = 1 if sig.direction == Direction.LONG else -1
-        gross = sum(d * (f.price - sig.entry) * f.qty for f in pos.fills)
-        notional = sig.entry * pos.init_qty + sum(f.price * f.qty for f in pos.fills)
-        fees = notional * self.cfg.fee_pct / 100.0
-        pnl = gross - fees
-
-        exit_qty = sum(f.qty for f in pos.fills)
-        exit_price = sum(f.price * f.qty for f in pos.fills) / exit_qty
-        exit_reason = pos.fills[-1].reason
-        if any(f.reason == "PARTIAL_TP" for f in pos.fills) and exit_reason != "PARTIAL_TP":
-            exit_reason = f"PARTIAL_TP+{exit_reason}"
-
-        trade = Trade(
-            entry_ts=sig.ts,
-            entry_date=_iso(sig.ts),
-            exit_date=_iso(exit_ts),
-            symbol=self.symbol,
-            daily_bias=sig.direction.value,
-            entry_reason=sig.reason,
-            pattern=sig.pattern,
-            atr=round(sig.atr, 8),
-            entry=sig.entry,
-            stop_loss=sig.sl,
-            take_profit=sig.tp,
-            risk_amount=round(pos.risk_amount, 2),
-            rr_planned=round(sig.rr, 2),
-            exit_reason=exit_reason,
-            exit_price=round(exit_price, 8),
-            pnl=round(pnl, 2),
-            r_multiple=round(pnl / pos.risk_amount, 2) if pos.risk_amount else 0.0,
-            mfe_r=round(pos.mfe_r, 2),
-            mae_r=round(pos.mae_r, 2),
-        )
-        return trade, pnl
+                "final_balance": balance, "halts": guard.halts}
 
 
 # ---------------------------------------------------------------------- #
@@ -151,8 +169,11 @@ def summarize(trades: list[Trade], equity: list[tuple[int, float]],
         if peak > 0:
             max_dd = max(max_dd, (peak - bal) / peak * 100.0)
 
+    span_months = max((equity[-1][0] - equity[0][0]) / (30.44 * DAY_MS), 1e-9)
+
     return {
         "trades": len(trades),
+        "trades_per_month": len(trades) / span_months,
         "win_rate": len(wins) / len(trades) * 100.0,
         "expectancy_r": sum(t.r_multiple for t in trades) / len(trades),
         "profit_factor": gross_win / gross_loss if gross_loss > 0 else float("inf"),

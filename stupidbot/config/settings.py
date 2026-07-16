@@ -11,10 +11,29 @@ from pathlib import Path
 @dataclass
 class Settings:
     # --- Risiko ---
-    risk_per_trade_pct: float = 1.0    # % balance yang dirisikokan per trade
+    risk_per_trade_pct: float = 1.0    # fallback bila adaptive risk dimatikan
     min_rr: float = 2.0                # RR minimum, tidak boleh diturunkan
     max_rr: float = 5.0                # RR maksimum yang dikejar dari struktur
     fee_pct: float = 0.05              # taker fee per sisi (%)
+
+    # --- Adaptive risk ---
+    # tier naik satu tingkat HANYA saat equity mencetak high baru;
+    # turun satu tingkat saat drawdown dari peak melewati ambang.
+    risk_tiers_pct: tuple = (0.5, 1.0, 1.5)
+    risk_step_down_dd_pct: float = 3.0
+
+    # --- Equity protection ---
+    daily_dd_stop_pct: float = 2.0     # dd harian > ini → stop sampai hari berikutnya (UTC)
+    total_dd_stop_pct: float = 8.0     # dd total > ini → cooldown
+    total_dd_cooldown_days: int = 14   # lama cooldown setelah dd total tersentuh
+
+    # --- Quality over quantity ---
+    max_trades_per_month: int = 10     # target 3-10 trade berkualitas per bulan
+    entry_cooldown_hours: float = 12.0  # jeda minimal antar entry
+
+    # --- Portfolio mode ---
+    max_open_positions: int = 1        # posisi bersamaan maksimal
+    min_structure_score: float = 50.0  # skor struktur Daily minimal agar layak dipilih
 
     # --- ATR (satu-satunya indikator yang diizinkan) ---
     atr_period: int = 14
